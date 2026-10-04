@@ -1,5 +1,11 @@
+import 'dart:async';
+
 import 'package:feijian/app.dart';
 import 'package:feijian/core/models/peer.dart';
+import 'package:feijian/data/database.dart';
+import 'package:feijian/state/data_providers.dart';
+import 'package:feijian/state/lan_provider.dart';
+import 'package:feijian/state/lan_service.dart';
 import 'package:feijian/state/providers.dart';
 import 'package:feijian/ui/pages/chat_page.dart';
 import 'package:flutter/material.dart';
@@ -19,13 +25,30 @@ const Peer _fakeSelf = Peer(
 /// The local-device provider reads real network interfaces, and the peer list
 /// opens real UDP sockets on port 24250. Overriding both keeps these tests
 /// deterministic, fast, and independent of whatever else is on the machine.
-Widget _app({List<Peer> peers = const <Peer>[]}) {
+///
+/// The database is a real one, in memory: settings are read from it during
+/// startup, and a stub would not catch a mistake in that read.
+Widget _app(AppDatabase database, {List<Peer> peers = const <Peer>[]}) {
   return ProviderScope(
     overrides: <Override>[
+      databaseProvider.overrideWithValue(database),
       selfDeviceProvider.overrideWith((Ref ref) async => _fakeSelf),
       downloadPathProvider.overrideWith((Ref ref) async => '/tmp/Feijian'),
       discoveredPeersProvider.overrideWith(
         (Ref ref) => Stream<List<Peer>>.value(peers),
+      ),
+      // The message router binds a TCP port and dials every peer it hears
+      // about. Neither belongs in a widget test: the listener would hold port
+      // 24250 that the next test in this file also wants, and dialling a peer
+      // that is not there leaves an eight second connect timeout pending when
+      // the tree is torn down.
+      //
+      // Left unresolved, which is also a state the app really has — while the
+      // service is starting, and whenever the port is taken — and the screens
+      // still render: the device list from the announce table, the conversation
+      // from the database.
+      lanServiceProvider.overrideWith(
+        (Ref ref) => Completer<LanService>().future,
       ),
     ],
     child: const FeijianApp(),
@@ -33,10 +56,18 @@ Widget _app({List<Peer> peers = const <Peer>[]}) {
 }
 
 void main() {
+  late AppDatabase database;
+
+  setUp(() => database = AppDatabase.memory());
+  // Closed rather than left to the GC: drift warns when a second database is
+  // created while an earlier one is still open, and that warning is worth
+  // keeping meaningful for the tests that would benefit from it.
+  tearDown(() => database.close());
+
   // The default test surface (800x600) sits below kTwoPaneMinWidth, so these
   // exercise the single-pane phone layout.
   testWidgets('boots to the device list', (WidgetTester tester) async {
-    await tester.pumpWidget(_app());
+    await tester.pumpWidget(_app(database));
     // Two pumps: one to build, one to settle the overridden futures.
     await tester.pump();
     await tester.pump();
@@ -50,7 +81,7 @@ void main() {
   testWidgets('opens settings from the device list', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(_app());
+    await tester.pumpWidget(_app(database));
     await tester.pump();
     await tester.pump();
 
@@ -78,7 +109,7 @@ void main() {
       isOnline: true,
     );
 
-    await tester.pumpWidget(_app(peers: const <Peer>[bob]));
+    await tester.pumpWidget(_app(database, peers: const <Peer>[bob]));
     await tester.pump();
     await tester.pump();
 

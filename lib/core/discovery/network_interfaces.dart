@@ -159,6 +159,37 @@ abstract final class NetworkInterfaceHelper {
     return best;
   }
 
+  /// True if a TCP connection from [address] should be accepted.
+  ///
+  /// The symmetry with [isUsableIpv4] is deliberate but not identical, because
+  /// the two questions are different. Discovery asks "can I reach peers from
+  /// this address?" and so rejects link-local, which means DHCP never finished.
+  /// Accepting asks "did this connection come from the LAN?" and link-local
+  /// *is* the LAN — two devices with no DHCP server can still reach each other,
+  /// and refusing them would be wrong.
+  ///
+  /// The rule is simply: refuse anything that arrived from the internet. The
+  /// listener binds `anyIPv4`, so a router port-forward would otherwise expose
+  /// it to the whole world, and this is the check that keeps a LAN-only product
+  /// LAN-only. CGNAT (100.64/10) is allowed because Tailscale and carrier-grade
+  /// NAT live there, and a peer reachable at such an address is a peer, not a
+  /// stranger.
+  static bool isAcceptablePeerAddress(InternetAddress address) {
+    if (address.type != InternetAddressType.IPv4) {
+      return false;
+    }
+    if (address.isLoopback) {
+      return true; // same machine, which tests rely on
+    }
+    final List<int> b = address.rawAddress;
+    if (b[0] == 10) return true;
+    if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true; // CGNAT
+    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+    if (b[0] == 192 && b[1] == 168) return true;
+    if (b[0] == 169 && b[1] == 254) return true; // link-local
+    return false;
+  }
+
   /// Public addresses are ranked last but still usable: a machine on a routable
   /// network has no private address to prefer, and returning null would leave
   /// the device card claiming it has no address at all.

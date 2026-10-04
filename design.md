@@ -258,9 +258,12 @@ NetworkInterface.list(type: InternetAddressType.IPv4)
 └──────────────┴────────────────────────┴──────────────────┘
 ```
 
-- `headerLen` 上限 **1 MB**，超限直接断开连接（防止损坏/恶意包导致内存爆炸）
+- `headerLen` 上限 **1 MB**，超限直接断开连接（防止损坏/恶意包导致内存爆炸）。
+  注意校验顺序：**先查 `headerLen` 再等 body**，否则一个恶意长度值就能在判断合法性之前先撑爆内存。
 - `payload` 长度由 `header.size` 决定；无 payload 的帧省略
 - 单帧 payload 上限 **512 KB**（文件分块大小 = 256 KB，留余量）
+
+> **`size` 是帧层保留字段**，任何 payload 定义都不得占用它。原 §4.3 给 `file_offer` 的字段也叫 `size`（含义是文件总大小），与这里冲突：一个 4GB 的文件会被读成"payload 长 4GB"，超过 512KB 上限而被判定为损坏流、断开连接。已将该字段改名为 `totalSize` —— 这也是 §4.6 里文件夹场景本来就用的名字，单文件与文件夹两种 offer 因此统一。
 
 ### 4.3 帧类型
 
@@ -269,7 +272,7 @@ NetworkInterface.list(type: InternetAddressType.IPv4)
 | `hello` | 双向 | `role`, `deviceId`, `name`, `device`, `icon`, `port`, `version`, `caps` | 连接建立后**第一帧**，`role` ∈ `control`/`data` |
 | `msg` | 双向 | `msgId`, `ts`, `text`, `replyTo?` | 文字消息 |
 | `msg_ack` | 双向 | `msgId`, `ts` | 送达回执 |
-| `file_offer` | 发送方→接收方 | `xferId`, `name`, `size`, `mime`, `isDir`, `files[]?`, `sha256?`, `mtime` | 传输请求 |
+| `file_offer` | 发送方→接收方 | `xferId`, `name`, `totalSize`, `mime`, `isDir`, `files[]?`, `sha256?`, `mtime` | 传输请求（`totalSize`，**不是** `size` —— 见 §4.2） |
 | `file_accept` | 接收方→发送方 | `xferId`, `resumeFrom` | 接受，可指定续传起点 |
 | `file_reject` | 接收方→发送方 | `xferId`, `reason` | 拒绝/取消 |
 | `file_data` | 发送方→接收方 | `xferId`, `relPath?`, `offset`, `size`, `eof` | 数据分块，payload 为原始字节 |
@@ -294,13 +297,26 @@ NetworkInterface.list(type: InternetAddressType.IPv4)
 
 规则确定性强、无协商开销、两端独立计算得出相同结论。
 
+**实现要点**：规则必须表述成两端都能独立算出的形式，即"由 `deviceId` 较小的一方发起的那条连接胜出"。不能用"保留我发起的"或"保留更新的那条"——那样两端会各自保留同一条 socket 而关掉对方的，剩下的两条恰好都在对方的关闭列表里，结果是双方都断开。同时连接时每端各看到一条入站和一条出站，规则才有确定答案；两端都是同向连接只可能来自重复拨号，此时保留既有连接并记日志。
+
+**去重期间发出的帧要在胜出连接上重发**：两端互相 announce 就会互相拨号，因此在去重完成之前的短暂窗口里两条 socket 都是 up 的，而第一条连接 ready 触发的离线队列 flush（§5.2）可能正好写进那条即将被关掉的 socket。接收方若不巧在同一时刻关闭它，这帧就丢了——而发送方这边已经把它标成 `sent`，队列不再管它，只剩 10s 后的 ack 超时重发能兜住，用户看到的是"对端明明在线，第一条消息却卡了一个勾十秒"。所以：**去重换连接时，把该 peer 所有未 ack 的帧在新连接上立即重发一次**，不消耗重试次数。代价是接收方可能收到一帧重复消息，而重复去重（§4.5）本来就是必须做的事——用一次可去重的重复换掉一个可见的卡顿。
+
+#### 4.4.1 连接失败在 Windows 上要约 2 秒（实测结论）
+
+在本机（Windows 11）实测：向一个**没人监听**的回环端口发起 `Socket.connect`，从调用到抛出 `SocketException`（errno 1225，连接被拒绝）稳定耗时 **约 2000ms**，与端口号无关，重复连接同样如此。这不是 Dart 的开销，是 Windows 报告 SYN 被拒的固有延迟。
+
+对实现有两条硬性影响：
+
+1. **发送路径不能等连接。** 用户点发送时若对端刚离线，等 `connect` 返回再决定"发不出去"会让界面卡两秒。正确做法是先落库、标 `pending`、立即返回，由后台连接与离线队列（§5.2）负责最终送达。
+2. **重连退避要按"每次尝试本身就要两秒"来设计。** 退避间隔短于失败耗时没有意义——真正的节奏由 connect 的失败时间决定，`kReconnectBackoff` 只负责在成功之后拉长间隔。
+
 ### 4.5 消息可靠性与去重
 
 - 每条消息有全局唯一 `msgId`（UUIDv4）
 - 接收方维护最近 1000 条 `msgId` 的 LRU 集合，重复消息直接丢弃并回 `msg_ack`
 - 发送方状态机：`pending` →（发出 `msg`）→ `sent` →（收到 `msg_ack`）→ `delivered`
 - 10s 未收到 `msg_ack` 且连接仍在 → 重发（最多 3 次），仍失败则标 `failed`，UI 显示红色感叹号可手动重试
-- **排序**：不依赖对端时钟（设备时钟可能不同步）。本地按 `(created_at DESC, msgId)` 稳定排序，`created_at` 为本地接收/发送时间
+- **排序**：不依赖对端时钟（设备时钟可能不同步）。本地按 `created_at DESC` 排序，`created_at` 为本地接收/发送时间，且**同一会话内严格递增**（§5.2.1）。原设计写的 `(created_at DESC, msgId)` 里的 `msgId` 起不到稳定作用——它是随机 UUID，等于随机排序，已改。
 
 ### 4.6 文件传输流程
 
@@ -381,9 +397,10 @@ CREATE TABLE peer (
 );
 
 -- 会话
+-- 注意：peer_id **不加** FOREIGN KEY（与最初草案不同，见下方说明）
 CREATE TABLE conversation (
   id            TEXT PRIMARY KEY,
-  peer_id       TEXT NOT NULL REFERENCES peer(id),
+  peer_id       TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
   last_msg_at   INTEGER,
   unread_count  INTEGER DEFAULT 0,
@@ -438,18 +455,47 @@ CREATE TABLE transfer (
 CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
+**外键的三条规则**（`PRAGMA foreign_keys = ON` 必须显式打开，否则全部形同虚设）：
+
+| 关系 | 处理 | 理由 |
+|---|---|---|
+| `attachment.message_id → message` | `ON DELETE CASCADE` | 附件脱离消息就没有意义，留着只会变成垃圾文件 |
+| `transfer.message_id/attachment_id → ...` | 默认 | 传输任务可独立于消息清理 |
+| `conversation.peer_id → peer` | **不建外键** | 见下 |
+
+`conversation.peer_id` 不加外键，是对最初草案的修正。原因是 `peer` 表只是"设备广播内容的缓存"，而 `conversation`/`message` 是**用户自己的数据**。一旦建了引用，"忘记此设备"这个唯一会删除 peer 行的操作就只剩两种结局：
+
+- 默认的 `NO ACTION`：SQLite **拒绝删除**，功能直接不可用；
+- `ON DELETE CASCADE`：删设备顺手把聊天记录一起抹掉，且不可撤销。
+
+两者都不可接受——用户整理设备列表不该付出丢历史的代价。另外 `message.peer_id` 本身就没有引用，说明"有 peer_id 但没有 peer 行"本来就是这份 schema 允许的状态，单给 conversation 加约束连一致性都换不来。
+
+**草稿会自己建出会话行**。`conversation` 行本来只在落第一条消息时创建（§5.1 的 `ensureConversation`），但草稿完全可以先于消息存在——给一个刚发现的设备打第一个字，正是最常见的场景，此时那行还不存在。所以写草稿前先 `ensureConversation`：否则 `UPDATE ... WHERE peer_id = ?` 匹配零行，SQLite 照样报成功，用户切到别的设备再切回来，打了一半的字就没了。这时会话行的 `last_msg_at` 仍为 NULL——草稿不是消息，不该把设备列表按"最近消息"重排，也不该动未读徽标。
+
 ### 5.2 离线消息队列
 
 对端不在线时的处理：
 
 1. 消息正常落库，`status = 'pending'`，立即在 UI 显示（带时钟图标）
-2. 进入内存发送队列 `Map<peerId, Queue<message>>`
+2. 队列**不放在内存里**，直接查库：`SELECT ... WHERE status='pending' ORDER BY created_at`。原设计写的 `Map<peerId, Queue<message>>` 会导致重启后队列丢失，而第 6 条本来就要求重启后恢复——查库是唯一同时满足两条的做法。
 3. 触发补发的时机：
    - 收到该 peer 的 ANNOUNCE
    - 与该 peer 的 control 连接握手成功
 4. 补发时按 `created_at` 升序逐条发送，**沿用原 `msgId`**（对端按 msgId 去重，避免重复显示）
 5. 文件消息离线时，只补发 `file_offer`；文件仍在本地磁盘，可重新读取。若文件已被删除/移动，标记该消息 `failed` 并在气泡上显示"文件已不存在"
 6. 应用重启后，从 `message WHERE status='pending'` 恢复队列
+
+#### 5.2.1 `created_at` 在会话内必须严格递增（实测结论）
+
+`created_at` 是**毫秒**精度，而消息 id 是随机 UUID v4。所以两条落在同一毫秒的消息**没有确定顺序**：`ORDER BY created_at, id` 里的 `id` 起不到排序作用，等于抛硬币。实测到的症状是 §5.2 那条「按顺序补发」的测试约每六次失败一次，三条消息每次以不同的顺序到达。
+
+这不是罕见边界。补发本身就是最坏情况——整条队列在一毫秒内发完；接收端同样如此，因为入站消息打的是**接收方的**时钟（§4.5），一串连到的消息会共用同一个毫秒值。
+
+因此**写入时**保证同一会话内 `created_at` 严格递增：新消息的时间戳若 `<=` 该会话已有的最大值，就取 `最大值 + 1`。三个推论：
+
+- 放在写入侧而不是两条 `ORDER BY` 里，是因为 `page()` 的排序同时是 keyset 游标的比较依据（游标得由调用方携带），而单调时间戳让现有查询和游标全部保持正确，不必改 schema，也不必改游标。
+- 必须和插入在**同一个事务**内，否则两个并发写入会读到同一个最大值、再次撞在一起。
+- 代价是时间戳可能比墙上时钟快一点点（突发中每条 +1ms）。这是聊天记录普遍接受的取舍，且偏离量由消息条数封顶，不会无端漂移。副作用是**时钟往回跳时新消息仍排在最后**——这正是想要的：刚敲的消息不该插进历史中间。
 
 ---
 
@@ -554,7 +600,7 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 | Ctrl+V 粘贴文件路径 | 识别为文件，作为文件消息发送 |
 | 图片气泡点击 | 全屏查看器，支持双指/滚轮缩放、左右切换同会话图片 |
 | 文件卡片点击 | 已下载 → 系统默认程序打开；未下载 → 开始下载 |
-| 长按/右键消息 | 复制文字 / 另存为 / 删除本地记录 |
+| 长按/右键消息 | 复制文字 / 另存为 / 删除本地记录（M2 只有文字那两项，另存为属 M3） |
 | 发送失败 | 气泡旁红色感叹号，点击重试 |
 | 滚动到顶 | 分页加载更早历史（每页 50 条） |
 
@@ -563,6 +609,18 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - ✓ `sent` — 已发出，未确认
 - ✓✓ `delivered` — 对方已收到
 - ⚠ `failed` — 发送失败，可重试
+
+#### 6.3.1 消息菜单的三条语义
+
+**复制的是整条消息，不是选中片段。** 气泡里的文字因此是 `Text` 而不是 `SelectableText`：`SelectableText` 自己会吃掉长按手势去弹系统的选择工具条，结果是菜单在桌面上能开、在手机上永远开不了——而手机是这个 app 的主场。这是个明确的取舍：在聊天气泡里划选一部分文字不是真实需求，复制整条才是，菜单做的就是这件事。
+
+**「删除」只删本地。** 对方手里那条还在，也不会收到任何通知。所以菜单项写的是「Delete for me」而不是「Delete」——一个不告诉对方、只影响自己的操作，措辞上就不该让人以为对方那头也没了。
+
+**「清空历史」要二次确认，单条删除不确认。** 单条删除是用户刚刚长按了那条消息、菜单就挨着它弹出来的；清空历史是点一个图标就可能抹掉几年的记录，屏幕上没有任何东西指向将要消失的内容。两者风险不同，确认与否也就不同。
+
+清空历史保留 `conversation` 行本身，因此**草稿和这个设备都还在**：草稿是用户自己敲的、此刻正显示在输入框里的字，不是历史，静默销毁它会让输入框里的内容在重开对话后凭空消失（`MessageDao.clearIn` 的注释里写了同样的话）。`unread_count` 归零、`last_msg_at` 置 NULL——这两项是**消息的摘要**，消息没了，摘要也就不该留着，否则设备列表会一直预览一条用户刚删掉的消息。
+
+被删掉的 `pending` 消息就是一笔取消掉的欠账（§5.2）：删除即用户取消发送，下次 flush 不会把它捞回来。
 
 ### 6.4 页面三：Settings
 

@@ -60,13 +60,42 @@ const int kMaxDeviceIdLength = 64;
 
 const Duration kHeartbeatInterval = Duration(seconds: 30);
 
-/// Exponential backoff for reconnect attempts, in seconds.
-const List<int> kReconnectBackoff = <int>[1, 2, 5, 10, 30];
+/// Exponential backoff for reconnect attempts: the wait after the first
+/// failure, the second, and so on. The last entry repeats for every attempt
+/// after it, which is what keeps a peer that is gone for the afternoon from
+/// being dialled every second until it comes back.
+const List<Duration> kReconnectBackoff = <Duration>[
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 5),
+  Duration(seconds: 10),
+  Duration(seconds: 30),
+];
 
 /// How long to wait for an incoming `hello` before dropping a fresh socket.
 /// Without this, anyone on the LAN can hold connections open by connecting
 /// and staying silent.
 const Duration kHandshakeTimeout = Duration(seconds: 10);
+
+/// No bytes at all for this long → treat the connection as dead.
+///
+/// Three missed heartbeats. TCP will happily keep a connection "open" forever
+/// after the peer's network vanishes — a laptop lid closing, a Wi-Fi drop, a
+/// NAT entry expiring — because nothing is ever sent to trigger a reset. An
+/// application-level silence detector is the only thing that notices, and
+/// without one the peer list keeps showing a device that is long gone.
+const Duration kConnectionIdleTimeout = Duration(seconds: 90);
+
+/// How long an outbound connection has to be established before giving up.
+/// Without it a dropped SYN leaves the attempt hanging for the OS default,
+/// which on Windows is over 20 seconds.
+const Duration kConnectTimeout = Duration(seconds: 8);
+
+/// How long to wait for a closing `bye` to reach the OS before tearing the
+/// socket down. `destroy()` discards buffered bytes, so the goodbye has to be
+/// flushed first — but only briefly, since a connection is often closed
+/// precisely because the peer has stopped answering.
+const Duration kCloseFlushTimeout = Duration(seconds: 2);
 
 // --- Framing (design.md §4.2) ----------------------------------------------
 
@@ -97,6 +126,22 @@ const int kMsgMaxRetries = 3;
 /// Size of the recent-msgId LRU used to drop duplicates. Large enough to cover
 /// any realistic re-delivery window after a reconnect.
 const int kMsgDedupeWindow = 1000;
+
+/// Longest accepted message body, in UTF-16 code units.
+///
+/// A storage guard rather than a product limit: `text` travels inside the frame
+/// header, so without a bound a single peer could push a megabyte into the
+/// local database per message. ~64k characters is far more than anyone types,
+/// and still generous enough to paste a log into.
+const int kMaxMessageTextLength = 64 * 1024;
+
+/// How far a frame's `ts` may be from the local clock before it is treated as
+/// broken rather than informative.
+///
+/// Same reasoning as [kAnnounceMaxClockSkew]; the much wider window reflects
+/// that a frame's `ts` is display-only and is never used for ordering (§4.5),
+/// so there is no reason to be strict about it.
+const Duration kFrameMaxClockSkew = Duration(days: 3650);
 
 // --- Build metadata ---------------------------------------------------------
 

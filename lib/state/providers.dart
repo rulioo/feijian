@@ -35,8 +35,9 @@ final FutureProvider<Peer> selfDeviceProvider = FutureProvider<Peer>((
     os: _osLabel(),
     lastIp: ip,
     // Announced to peers so they know where to open the control connection.
-    // The TCP listener itself arrives in M2; until then this is the port the
-    // discovery socket is already on, which is what the design specifies.
+    // The TCP listener binds this same number (design.md §4.2): UDP discovery
+    // and TCP control are separate namespaces, so one port is one thing for a
+    // user to remember and one rule for a firewall.
     lastPort: settings.listenPort,
     isOnline: true,
   );

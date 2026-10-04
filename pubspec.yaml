@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+3
 
 environment:
   sdk: ^3.6.2
@@ -46,15 +46,30 @@ dependencies:
   uuid: ^4.5.1
   # Platform-correct download directory resolution (design.md §7.1)
   path_provider: ^2.1.5
+  # --- M2: message history (design.md §5.1, §10) ---
+  # Pinned below the newest release on purpose. drift_dev's newer versions pull
+  # analyzer >=8.1, which requires Dart >=3.7, and this project is on 3.6.2 —
+  # raise all three together when the SDK is raised, not individually.
+  drift: ^2.26.0
+  # The SQLite bindings. Named explicitly rather than left to drift's transitive
+  # dependency because `test/flutter_test_config.dart` calls into
+  # `package:sqlite3/open.dart` to find a library when running on the host.
+  sqlite3: ^2.4.0
+  # Ships the native SQLite that the app itself links against on every platform.
+  sqlite3_flutter_libs: ^0.5.24
 
   # Heavier dependencies are deliberately NOT added yet — each lands with the
-  # milestone that needs it: drift (M2 history), file_picker + desktop_drop +
-  # photo_view (M3 transfer), flutter_local_notifications + tray_manager +
-  # window_manager + flutter_foreground_task (M5 polish).
+  # milestone that needs it: file_picker + desktop_drop + photo_view (M3
+  # transfer), flutter_local_notifications + tray_manager + window_manager +
+  # flutter_foreground_task (M5 polish).
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Generates database.g.dart. The output is committed, like the generated
+  # localizations, so a fresh clone builds without running build_runner.
+  drift_dev: ^2.26.0
+  build_runner: ^2.4.13
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

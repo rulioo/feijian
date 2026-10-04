@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/discovery/discovery_service.dart';
 import '../../core/models/peer.dart';
 import '../../l10n/app_localizations.dart';
+import '../../state/chat_provider.dart';
+import '../../state/lan_provider.dart';
 import '../../state/providers.dart';
 import '../ui_constants.dart';
 import '../widgets/device_tile.dart';
@@ -27,9 +29,21 @@ class DevicesPage extends ConsumerWidget {
     final AppLocalizations l10n = AppLocalizations.of(context);
     final ThemeData theme = Theme.of(context);
     final List<Peer> peers = ref.watch(peersProvider);
-    final int onlineCount = ref.watch(onlinePeerCountProvider);
     final Peer? selected = ref.watch(selectedPeerProvider);
     final DiscoveryService discovery = ref.watch(discoveryServiceProvider);
+
+    // Reachable = announcing or connected. The two disagree in both directions
+    // — a network that drops UDP ages a peer we hold a connection to out of the
+    // announce table, and a peer whose listener could not bind still announces
+    // — and either is enough to talk to it, since a message to an absent peer
+    // queues rather than fails (§5.2).
+    final Set<String> connected =
+        ref.watch(onlinePeersProvider).valueOrNull ?? const <String>{};
+    bool reachable(Peer peer) => peer.isOnline || connected.contains(peer.id);
+
+    final int onlineCount = peers.where(reachable).length;
+    final Map<String, int> unread =
+        ref.watch(unreadByPeerProvider).valueOrNull ?? const <String, int>{};
 
     void openChat(Peer peer) {
       ref.read(selectedPeerProvider.notifier).state = peer;
@@ -77,9 +91,11 @@ class DevicesPage extends ConsumerWidget {
             for (final Peer peer in peers)
               DeviceTile(
                 peer: peer,
+                online: reachable(peer),
                 selected: selected?.id == peer.id,
+                unread: unread[peer.id] ?? 0,
                 onTap: () => openChat(peer),
-                onSendFile: peer.isOnline
+                onSendFile: reachable(peer)
                     ? () => _notImplemented(context)
                     : null,
               ),

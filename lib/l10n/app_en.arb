@@ -63,6 +63,25 @@
   "viewPeerInfo": "Device info",
   "clearHistory": "Clear history",
 
+  "messageActionCopy": "Copy text",
+  "messageActionDelete": "Delete for me",
+  "messageCopied": "Copied",
+  "messageDeleted": "Deleted from this device",
+  "actionDelete": "Delete",
+  "clearHistoryConfirm": "Delete every message in this conversation from this device? {name} keeps their own copy.",
+  "@clearHistoryConfirm": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "historyCleared": "History cleared",
+
+  "peerInfoId": "Device ID",
+  "peerInfoAddress": "Address",
+  "peerInfoType": "Type",
+  "peerInfoSystem": "System",
+  "peerInfoStatus": "Status",
+
   "settingsTitle": "Settings",
   "settingsSectionProfile": "Profile",
   "settingsSectionFiles": "Files",
@@ -103,6 +122,26 @@
   "deviceIconLaptop": "Laptop",
   "deviceIconPhone": "Phone",
   "deviceIconTablet": "Tablet",
+
+  "deviceTypeWindows": "Windows",
+  "deviceTypeAndroid": "Android",
+  "deviceTypeIos": "iOS",
+  "deviceTypeUnknown": "Unknown",
+
+  "messageStatusPending": "Waiting to send",
+  "messageStatusSent": "Sent",
+  "messageStatusDelivered": "Delivered",
+  "messageStatusFailed": "Not sent — tap to try again",
+  "actionRetry": "Try again",
+  "historyLoadFailed": "Could not load this conversation.",
+  "sendUnavailable": "Cannot send messages: the network service is not running.",
+  "loadingOlderMessages": "Loading earlier messages...",
+  "unreadMessagesCount": "{count, plural, =1{1 unread message} other{{count} unread messages}}",
+  "@unreadMessagesCount": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
 
   "notImplementedTitle": "Not implemented yet",
   "notImplementedBody": "This arrives in a later milestone.",

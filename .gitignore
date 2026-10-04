@@ -33,6 +33,11 @@ migrate_working_dir/
 .pub/
 /build/
 
+# Binaries built by hand for testing, e.g. `dart compile exe tool/lan_peer.dart`.
+# Output of a build, so not tracked — and deliberately not under /build/, which
+# `flutter clean` deletes.
+/dist/
+
 # Symbolication related
 app.*.symbols
 

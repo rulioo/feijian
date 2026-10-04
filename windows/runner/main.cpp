@@ -27,7 +27,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"feijian", origin, size)) {
+  // What the taskbar and the title bar show. The binary stays `feijian.exe`
+  // (windows/CMakeLists.txt `BINARY_NAME`), which is a filename; this is the
+  // product name, and the product is called Feijian.
+  if (!window.Create(L"Feijian", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

@@ -126,6 +126,44 @@ class AppLocalizationsEn extends AppLocalizations {
   String get clearHistory => 'Clear history';
 
   @override
+  String get messageActionCopy => 'Copy text';
+
+  @override
+  String get messageActionDelete => 'Delete for me';
+
+  @override
+  String get messageCopied => 'Copied';
+
+  @override
+  String get messageDeleted => 'Deleted from this device';
+
+  @override
+  String get actionDelete => 'Delete';
+
+  @override
+  String clearHistoryConfirm(String name) {
+    return 'Delete every message in this conversation from this device? $name keeps their own copy.';
+  }
+
+  @override
+  String get historyCleared => 'History cleared';
+
+  @override
+  String get peerInfoId => 'Device ID';
+
+  @override
+  String get peerInfoAddress => 'Address';
+
+  @override
+  String get peerInfoType => 'Type';
+
+  @override
+  String get peerInfoSystem => 'System';
+
+  @override
+  String get peerInfoStatus => 'Status';
+
+  @override
   String get settingsTitle => 'Settings';
 
   @override
@@ -225,6 +263,53 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get deviceIconTablet => 'Tablet';
+
+  @override
+  String get deviceTypeWindows => 'Windows';
+
+  @override
+  String get deviceTypeAndroid => 'Android';
+
+  @override
+  String get deviceTypeIos => 'iOS';
+
+  @override
+  String get deviceTypeUnknown => 'Unknown';
+
+  @override
+  String get messageStatusPending => 'Waiting to send';
+
+  @override
+  String get messageStatusSent => 'Sent';
+
+  @override
+  String get messageStatusDelivered => 'Delivered';
+
+  @override
+  String get messageStatusFailed => 'Not sent — tap to try again';
+
+  @override
+  String get actionRetry => 'Try again';
+
+  @override
+  String get historyLoadFailed => 'Could not load this conversation.';
+
+  @override
+  String get sendUnavailable => 'Cannot send messages: the network service is not running.';
+
+  @override
+  String get loadingOlderMessages => 'Loading earlier messages...';
+
+  @override
+  String unreadMessagesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count unread messages',
+      one: '1 unread message',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get notImplementedTitle => 'Not implemented yet';

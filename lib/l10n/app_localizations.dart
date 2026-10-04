@@ -297,6 +297,78 @@ abstract class AppLocalizations {
   /// **'Clear history'**
   String get clearHistory;
 
+  /// No description provided for @messageActionCopy.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy text'**
+  String get messageActionCopy;
+
+  /// No description provided for @messageActionDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete for me'**
+  String get messageActionDelete;
+
+  /// No description provided for @messageCopied.
+  ///
+  /// In en, this message translates to:
+  /// **'Copied'**
+  String get messageCopied;
+
+  /// No description provided for @messageDeleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Deleted from this device'**
+  String get messageDeleted;
+
+  /// No description provided for @actionDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get actionDelete;
+
+  /// No description provided for @clearHistoryConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete every message in this conversation from this device? {name} keeps their own copy.'**
+  String clearHistoryConfirm(String name);
+
+  /// No description provided for @historyCleared.
+  ///
+  /// In en, this message translates to:
+  /// **'History cleared'**
+  String get historyCleared;
+
+  /// No description provided for @peerInfoId.
+  ///
+  /// In en, this message translates to:
+  /// **'Device ID'**
+  String get peerInfoId;
+
+  /// No description provided for @peerInfoAddress.
+  ///
+  /// In en, this message translates to:
+  /// **'Address'**
+  String get peerInfoAddress;
+
+  /// No description provided for @peerInfoType.
+  ///
+  /// In en, this message translates to:
+  /// **'Type'**
+  String get peerInfoType;
+
+  /// No description provided for @peerInfoSystem.
+  ///
+  /// In en, this message translates to:
+  /// **'System'**
+  String get peerInfoSystem;
+
+  /// No description provided for @peerInfoStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Status'**
+  String get peerInfoStatus;
+
   /// No description provided for @settingsTitle.
   ///
   /// In en, this message translates to:
@@ -494,6 +566,84 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Tablet'**
   String get deviceIconTablet;
+
+  /// No description provided for @deviceTypeWindows.
+  ///
+  /// In en, this message translates to:
+  /// **'Windows'**
+  String get deviceTypeWindows;
+
+  /// No description provided for @deviceTypeAndroid.
+  ///
+  /// In en, this message translates to:
+  /// **'Android'**
+  String get deviceTypeAndroid;
+
+  /// No description provided for @deviceTypeIos.
+  ///
+  /// In en, this message translates to:
+  /// **'iOS'**
+  String get deviceTypeIos;
+
+  /// No description provided for @deviceTypeUnknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown'**
+  String get deviceTypeUnknown;
+
+  /// No description provided for @messageStatusPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting to send'**
+  String get messageStatusPending;
+
+  /// No description provided for @messageStatusSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Sent'**
+  String get messageStatusSent;
+
+  /// No description provided for @messageStatusDelivered.
+  ///
+  /// In en, this message translates to:
+  /// **'Delivered'**
+  String get messageStatusDelivered;
+
+  /// No description provided for @messageStatusFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Not sent — tap to try again'**
+  String get messageStatusFailed;
+
+  /// No description provided for @actionRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Try again'**
+  String get actionRetry;
+
+  /// No description provided for @historyLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load this conversation.'**
+  String get historyLoadFailed;
+
+  /// No description provided for @sendUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Cannot send messages: the network service is not running.'**
+  String get sendUnavailable;
+
+  /// No description provided for @loadingOlderMessages.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading earlier messages...'**
+  String get loadingOlderMessages;
+
+  /// No description provided for @unreadMessagesCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 unread message} other{{count} unread messages}}'**
+  String unreadMessagesCount(int count);
 
   /// No description provided for @notImplementedTitle.
   ///

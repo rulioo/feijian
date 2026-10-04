@@ -6,6 +6,7 @@ import '../constants.dart';
 import '../models/peer.dart';
 import 'announce.dart';
 import 'network_interfaces.dart';
+import 'peer_source.dart';
 import 'peer_table.dart';
 
 /// UDP device discovery — multicast plus broadcast, design.md §4.1.
@@ -24,7 +25,7 @@ import 'peer_table.dart';
 /// everything out the interface the routing table prefers, which on a Windows
 /// machine with Hyper-V installed is very often the virtual adapter. The
 /// failure mode is the worst kind: no error, no log, and no peer ever found.
-class DiscoveryService {
+class DiscoveryService implements PeerSource {
   DiscoveryService({
     int discoveryPort = kDiscoveryPort,
     String multicastGroup = kMulticastGroup,
@@ -43,7 +44,12 @@ class DiscoveryService {
 
   /// Fires whenever [table] changed. Broadcast: the service never depends on
   /// anyone listening.
+  @override
   Stream<void> get changes => _changes.stream;
+
+  /// The peer list as [PeerSource] sees it — same thing as `table.peers`.
+  @override
+  List<Peer> get peers => table.peers;
 
   final int _discoveryPort;
   final InternetAddress _multicast;
