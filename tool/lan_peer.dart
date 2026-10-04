@@ -217,6 +217,15 @@ Future<void> _repl(ConnectionManager manager, DiscoveryService discovery) async 
           break;
         }
         await _send(manager, target, parts.skip(2).join(' '));
+      case 'rescan':
+      case 'r':
+        // What the app's refresh button does, and the reason to have it here:
+        // this is the only way to drive the socket-rebuilding path from the PC
+        // side, where a packet capture can see whether anything left the
+        // machine. It returns at once — the rebuild and the announce burst
+        // happen behind it — so the peers appear in a later print, not this one.
+        discovery.rescan();
+        stdout.writeln('rebuilding the sockets and re-announcing…');
       case 'connect':
       case 'c':
         if (parts.length < 2) {
@@ -238,6 +247,7 @@ Future<void> _repl(ConnectionManager manager, DiscoveryService discovery) async 
       case '?':
         stdout.writeln(
           '  list                 peers, numbered\n'
+          '  rescan               rebuild the sockets and re-announce\n'
           '  send <who> <text>    <who> is a number, an id prefix, or a name\n'
           '  connect <who>        dial now\n'
           '  help / quit',

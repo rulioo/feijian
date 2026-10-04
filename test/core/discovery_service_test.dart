@@ -170,10 +170,50 @@ void main() {
   late _FakePeer peer;
   late List<String> logs;
 
+  /// Every socket the service has bound, in order.
+  ///
+  /// The service's own sockets are private, and a test needs to reach one to
+  /// close it — which is the only way to reproduce a latched socket without a
+  /// network that produces an ICMP port-unreachable on demand. So the binder is
+  /// the seam, and it hands out real sockets bound exactly as the default does.
+  late List<RawDatagramSocket> bound;
+
+  /// The socket the service listens on. One per service, on the discovery port.
+  Iterable<RawDatagramSocket> listeners() => bound.where(
+        (RawDatagramSocket s) => s.address.address == '0.0.0.0' && s.port == port,
+      );
+
+  /// Sockets bound to the wildcard on some other port — the one that answers.
+  Iterable<RawDatagramSocket> answerers() => bound.where(
+        (RawDatagramSocket s) => s.address.address == '0.0.0.0' && s.port != port,
+      );
+
+  /// The per-interface senders: one per usable address, so a real address.
+  ///
+  /// Empty on a machine with no usable interface, where the service falls back
+  /// to the routing table — which is the point of the fallback, and the reason
+  /// tests that need a sender say so rather than assuming one.
+  Iterable<RawDatagramSocket> senders() => bound.where(
+        (RawDatagramSocket s) => s.address.address != '0.0.0.0',
+      );
+
   Future<void> startService() async {
     port = await _servicePort();
     logs = <String>[];
-    service = DiscoveryService(discoveryPort: port, onLog: logs.add);
+    bound = <RawDatagramSocket>[];
+    service = DiscoveryService(
+      discoveryPort: port,
+      onLog: logs.add,
+      bind: (InternetAddress address, int atPort) async {
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        bound.add(socket);
+        return socket;
+      },
+    );
     service.updateSelf(_self);
     await service.start();
     addTearDown(service.dispose);
@@ -188,8 +228,10 @@ void main() {
     await startService();
 
     expect(service.isRunning, isTrue);
-    // A device with no usable interface still sends via the receiver socket's
-    // route rather than going mute, so this is non-empty either way.
+    expect(listeners(), hasLength(1));
+    // A device with no usable interface still sends via the routing table
+    // rather than going mute, so the answering socket exists either way.
+    expect(answerers(), isNotEmpty);
     expect(service.table.isEmpty, isTrue);
   });
 
@@ -340,5 +382,158 @@ void main() {
     fresh.rescan();
     await fresh.stop();
     fresh.rescan(); // after stop
+  });
+
+  // --- Recovering from a socket that has latched -----------------------------
+  //
+  // The failure these cover is the one that made the device list empty itself
+  // after a few minutes and never fill again, with a refresh button that did
+  // nothing. An ICMP port-unreachable latches a UDP socket on Windows: every
+  // later write returns 0, nothing clears it but closing the socket, and the
+  // app goes silent until the process is restarted. Closing a socket behind the
+  // service's back is what that looks like from the inside.
+
+  test('answers a probe from a socket of its own, not the listener', () async {
+    await startService();
+
+    expect(listeners(), hasLength(1));
+    expect(
+      answerers(),
+      isNotEmpty,
+      reason: 'a second wildcard socket, for answers — sharing the listener '
+          'would let one stale peer stop this device answering probes for good',
+    );
+
+    await peer.send(_announce(type: AnnounceType.probe, port: peer.port), port);
+    await _waitUntil(() => peer.received.isNotEmpty, reason: 'the reply');
+
+    // The reply arrived AND the listener was never a sender, which is the whole
+    // point: an error drawn on the answer path cannot reach the listening path.
+    expect(listeners(), hasLength(1));
+  });
+
+  test('a socket that stops accepting writes is replaced', () async {
+    await startService();
+
+    final RawDatagramSocket answering = answerers().first;
+    // Counting *answerers*, not every socket that gets bound. A sender is
+    // replaced under the same counter, and on a loaded machine ordinary UDP
+    // loss can reach that limit too (§4.1.1 measured ~4% of burst sends
+    // dropped) — so waiting on "some socket was bound" would let a sender's
+    // replacement satisfy the wait and then fail the log assertion below for a
+    // reason that has nothing to do with the answer path. Only this one grows
+    // when the answering socket is the one replaced.
+    final int answerersBefore = answerers().length;
+    answering.close();
+
+    for (int i = 0; i < 3; i++) {
+      await peer.send(
+        _announce(type: AnnounceType.probe, port: peer.port),
+        port,
+      );
+    }
+
+    await _waitUntil(
+      () => answerers().length > answerersBefore,
+      reason: 'the dead socket to be replaced',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+    expect(
+      logs.any((String line) => line.contains('replaced the socket answering')),
+      isTrue,
+      reason: 'and to say so — silence is what made this take a bug report and '
+          'an afternoon to find\n  logs=${logs.join(' | ')}',
+    );
+
+    // The replacement works: an answer goes out on it.
+    peer.received.clear();
+    await peer.send(_announce(type: AnnounceType.probe, port: peer.port), port);
+    await _waitUntil(
+      () => peer.received.isNotEmpty,
+      reason: 'a reply on the replacement socket',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+  });
+
+  test('a sender retired mid-announce does not break the announce', () async {
+    await startService();
+    final int senderCount = senders().length;
+    if (senderCount == 0) {
+      // No usable interface: the service is on its routing-table fallback and
+      // there is no per-interface sender to retire. Nothing to assert here, and
+      // the other tests still cover that path.
+      return;
+    }
+    final int bindsBefore = bound.length;
+
+    for (final RawDatagramSocket socket in senders()) {
+      socket.close();
+    }
+
+    // One announce is two writes per sender (multicast and broadcast), so the
+    // third write retires a socket — and it is retired *while* the loop that is
+    // writing to it walks the list. That used to throw
+    // `ConcurrentModificationError` out of the middle of the announce, killing
+    // the sends to every interface after the first, and (through the timer and
+    // the unawaited refresh) it landed as an unhandled async error rather than
+    // anywhere near its cause.
+    //
+    // `updateSelf` is the way in because it announces synchronously: a rename
+    // that threw would throw here, in the test, and not three tests later.
+    for (int i = 0; i < 4; i++) {
+      expect(
+        () => service.updateSelf(
+          Peer(
+            id: _self.id,
+            name: 'Test-Box $i',
+            deviceType: DeviceType.windows,
+            icon: DeviceIcon.desktop,
+            lastPort: port,
+          ),
+        ),
+        returnsNormally,
+      );
+    }
+
+    await _waitUntil(
+      () => bound.length > bindsBefore,
+      reason: 'the dead senders to be replaced',
+      diagnostics: () =>
+          '  answerers=${answerers().length} senders=${senders().length}\n'
+          '  logs=${logs.join(' | ')}',
+    );
+    expect(
+      logs.any((String line) => line.contains('replaced the sender on')),
+      isTrue,
+      reason: 'and to say so',
+    );
+  });
+
+  test('rescan binds fresh sockets and leaves discovery working', () async {
+    await startService();
+    // The answering socket, because rebuilding it is specific to a refresh: a
+    // sender replacement is triggered by refused writes, which is the other
+    // heading in this group. Waiting on "any new socket" would accept one of
+    // those and the test would pass without a rescan having done anything.
+    final int answerersBefore = answerers().length;
+
+    // What the refresh button does. It has to replace the sockets rather than
+    // re-announce on them, because a latched socket is the usual reason the
+    // list stopped changing and writing to it again is a no-op.
+    service.rescan();
+
+    await _waitUntil(
+      () => answerers().length > answerersBefore,
+      reason: 'the sockets to be rebuilt',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+
+    peer.received.clear();
+    await peer.send(_announce(type: AnnounceType.probe, port: peer.port), port);
+    await _waitUntil(
+      () => peer.received.isNotEmpty,
+      reason: 'a reply after the rebuild',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
   });
 }

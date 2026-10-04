@@ -246,6 +246,24 @@ NetworkInterface.list(type: InternetAddressType.IPv4)
 
 另外注意：UDP socket 收到 ICMP port-unreachable 后，Windows 会把错误"记住"，此后 `send()` 可能**持续**返回 0。这种情况下只有检查返回值才能发现问题。
 
+### 4.1.2 锁死的发送 socket 必须被换掉（实测结论）
+
+上一节最后那句"此后 `send()` 可能**持续**返回 0"不是理论风险，它是真机上的主症状。
+
+真机实测（Windows peer + Android APK 同 Wi-Fi）：**刚连上一切正常，几分钟后两边互相搜不到；点刷新无效，点 Rescan 无效；杀掉一端进程重开，立刻又连上。**
+
+- 最后一条是决定性的：重启能恢复，说明广播机制、端口、防火墙、网卡选择全都是好的——重启唯一改变的是**进程内的 socket 对象**。
+- 前两条说明故障在发送侧且**不可自愈**：`RawDatagramSocket` 一旦锁存，后续每次 `send()` 都静默返回 0，重发（刷新）走的是同一个已死的 socket，所以重发等于没发。
+- 只有检查返回值（§4.1.1）才能发现它，但发现了也没有用——**错误不会自己清除，只有关闭这个 socket 才清除**。
+
+因此实现上：
+
+1. **发送 socket 连续 3 次写入失败后被丢弃并重新绑定**。一轮发送对每个 socket 写两次（组播 + 广播），所以真正死掉的 socket 约两轮就达到阈值（约 `kAnnounceInterval`×2）；而一个健康的 socket 在一串突发里偶尔丢一个包只会计到 1，下一次成功写入就清零。
+2. **`rescan()` 重建 socket，而不是在原 socket 上重发**。这正是"点刷新没反应"的根因：用户按刷新时 socket 大概率已经锁死，在它上面重发是空操作。现在的做法是关掉全部 socket（含应答 socket）重新绑定，再发 3 轮 probe+announce，每轮间隔 400ms——一次 UDP 在 Wi-Fi 上是一次抛硬币，而这里是用户正盯着屏幕等结果的地方，是整个协议里唯一值得连发的地方。
+3. **应答走独立 socket，不复用监听 socket**。`_reply` 把单播回复发往探测方的端口，如果那个端口已经没人监听，引回的 ICMP port-unreachable 会锁死**发送它的那个 socket**。旧实现里 `_reply` 从接收 socket 发出，等于让一个已经消失的对端把本机的探测应答能力永久打死；而探测应答恰恰是收不到组播的设备（Android 未取 `MulticastLock` 时就是）唯一的信息来源。现在应答专用一个绑定到通配地址的 socket，监听路径和应答路径互不牵连。
+
+一个实现上的坑，值得单独记：**替换 socket 的代码会在发送循环内部改 `_senders`**。`_send` 遍历 `_senders`，循环体里 `_sendTo` 失败会触发 `_replace`，而 `_replace` 在第一个 `await` 之前的语句是同步执行的——于是"从列表里删掉这个死 socket"正好发生在遍历它的过程中，抛 `ConcurrentModificationError`。这不是"少发一个包"那么轻：它是个未捕获的异步异常，从 `_send` 中间炸出去，后面所有网卡的 announce 全部没发出。所以 `_send` 遍历的是 `_senders` 的**副本**，另外 `_noteSendFailure` 会忽略已经不属于本服务的 socket（副本里可能还留着刚被关掉的）。这个 bug 由新加的回归测试捕获——把发送 socket 关掉再触发四次 announce，旧代码必现。
+
 ### 4.2 帧格式（TCP）
 
 控制连接与数据连接共用同一套帧格式：
