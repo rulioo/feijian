@@ -13,6 +13,15 @@ import 'dart:io';
 abstract final class NetworkInterfaceHelper {
   /// Substrings that identify a virtual or otherwise unusable adapter.
   /// Matched case-insensitively against the interface name.
+  /// Matched case-insensitively against the interface name.
+  ///
+  /// `tun` covers WireGuard's and most VPN clients' "... Tunnel" adapters.
+  /// The list is necessarily a heuristic — there is no OS flag that means
+  /// "this adapter is not the LAN" — so an unrecognised VPN can still slip
+  /// through. That is why [primaryIpv4] also prefers LAN-shaped ranges, and why
+  /// design.md §4.1 puts a manual interface picker in settings as the escape
+  /// hatch. `cloudflare` is here because Cloudflare WARP's adapter was observed
+  /// on a real machine being chosen over the live Wi-Fi NIC.
   static const List<String> virtualAdapterMarkers = <String>[
     'vethernet', // Hyper-V, WSL2
     'hyper-v',
@@ -27,6 +36,23 @@ abstract final class NetworkInterfaceHelper {
     'tailscale',
     'hamachi',
     'bluetooth',
+    // VPN clients that install an adapter of their own.
+    'cloudflare', // WARP
+    'wireguard',
+    'nordlynx',
+    'mullvad',
+    'proton',
+    'windscribe',
+    'surfshark',
+    'openvpn',
+    'anyconnect', // Cisco
+    'globalprotect', // Palo Alto
+    'forticlient',
+    'softether',
+    'radmin',
+    'teredo', // IPv6 transition tunnels
+    'isatap',
+    '6to4',
   ];
 
   /// True if the adapter is virtual or otherwise a poor choice for LAN
@@ -103,37 +129,53 @@ abstract final class NetworkInterfaceHelper {
     return result;
   }
 
-  /// Best guess at the machine's LAN address, for display on the device card.
+  /// Best guess at the machine's LAN address, for display on the device card
+  /// and for the address peers are told to reach us at.
   ///
-  /// Prefers a private-range address (192.168 / 10. / 172.16-31) since those
-  /// are what peers on the same LAN will actually be reachable at.
   /// Returns null when no usable interface exists (e.g. airplane mode).
+  ///
+  /// Picks the lowest [addressRank], which both prefers private ranges over
+  /// public ones and orders the private ranges by how likely they are to be the
+  /// real LAN. The ordering is a heuristic, not a rule: 172.16/12 is where
+  /// Docker, WARP and a long list of VPN clients squat, so it loses to 10/8 even
+  /// though both are equally "private". Getting this wrong is not a cosmetic
+  /// problem — the address shown here is the one advertised to peers, and a
+  /// peer that is handed an unreachable address cannot connect at all.
   static Future<String?> primaryIpv4() async {
     final Map<NetworkInterface, List<String>> interfaces =
         await usableInterfaces();
-    String? fallback;
+
+    String? best;
+    int bestRank = publicRank + 1; // beats nothing, so any address wins
     for (final List<String> addresses in interfaces.values) {
       for (final String address in addresses) {
-        fallback ??= address;
-        if (_isPrivateIpv4(address)) {
-          return address;
+        final int rank = addressRank(address);
+        if (rank < bestRank) {
+          best = address;
+          bestRank = rank;
         }
       }
     }
-    return fallback;
+    return best;
   }
 
-  static bool _isPrivateIpv4(String address) {
+  /// Public addresses are ranked last but still usable: a machine on a routable
+  /// network has no private address to prefer, and returning null would leave
+  /// the device card claiming it has no address at all.
+  static const int publicRank = 4;
+
+  /// Lower is a better guess at the LAN address. Ties keep the first seen.
+  static int addressRank(String address) {
     final List<int> b = InternetAddress(address).rawAddress;
-    if (b[0] == 10) {
-      return true;
-    }
     if (b[0] == 192 && b[1] == 168) {
-      return true;
+      return 0; // home and small-office Wi-Fi
+    }
+    if (b[0] == 10) {
+      return 1;
     }
     if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) {
-      return true;
+      return 2; // also Docker, WARP and VPNs — hence third
     }
-    return false;
+    return publicRank;
   }
 }

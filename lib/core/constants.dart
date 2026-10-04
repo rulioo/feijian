@@ -37,6 +37,25 @@ const Duration kPeerOfflineAfter = Duration(seconds: 15);
 /// No packet for this long → drop from the device list (the DB row survives).
 const Duration kPeerRemoveAfter = Duration(seconds: 60);
 
+/// Announces whose `ts` is further than this from our own clock are dropped.
+/// They are either stale (queued behind a network stall) or from a device whose
+/// clock is badly wrong — either way the packet says nothing trustworthy about
+/// "now", and it is `ts` that decides whether a peer counts as online.
+///
+/// Deliberately generous: two consumer devices on a LAN routinely disagree by
+/// seconds, and a tight window would silently break discovery between two
+/// perfectly healthy machines. This bounds the damage, it does not sync clocks.
+const Duration kAnnounceMaxClockSkew = Duration(seconds: 60);
+
+/// Longest accepted display name. Anything longer cannot be rendered anyway,
+/// and the cap keeps one peer's name from crowding the rest of the fields out
+/// of the 1400-byte datagram budget.
+const int kMaxDeviceNameLength = 64;
+
+/// Longest accepted device id. A UUIDv4 is 36 characters; the headroom is for
+/// a future id format, not for unbounded input from the network.
+const int kMaxDeviceIdLength = 64;
+
 // --- Connection timing ------------------------------------------------------
 
 const Duration kHeartbeatInterval = Duration(seconds: 30);

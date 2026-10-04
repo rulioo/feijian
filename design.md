@@ -213,11 +213,38 @@ NetworkInterface.list(type: InternetAddressType.IPv4)
 
 必须过滤掉以下接口，否则广播会发到虚拟网卡上（Windows 上的高频问题）：
 
-- 名称匹配 `vEthernet`（Hyper-V/WSL）、`VMware`、`VirtualBox`、`Loopback`、`docker`
+- 名称匹配 `vEthernet`（Hyper-V/WSL）、`VMware`、`VirtualBox`、`docker`
+- 名称匹配 VPN 客户端自建的网卡：`cloudflare`（WARP）、`wireguard`、`tailscale`、`zerotier`、`anyconnect`、`globalprotect`、`forticlient` 等
 - 地址为 `127.*`、`169.254.*`（链路本地，说明没拿到 DHCP）
-- 接口 `isLoopback == true`
+
+~~接口 `isLoopback == true`~~ —— **Dart 的 `NetworkInterface` 没有这个属性**，只有 `InternetAddress.isLoopback`。回环接口靠地址过滤自然排除（它只承载 127/8），不需要单独判断。
 
 对**每个**存活的非回环 IPv4 接口分别绑定 socket 发送，而不是依赖默认路由。设置页提供网卡勾选列表，让用户手动排除异常网卡。
+
+**仅靠名称匹配不够**：实测在某台开发机上，Cloudflare WARP 的网卡 `172.16.0.2` 不含任何虚拟网卡特征词，且因为长得像私有网段地址而被 `primaryIpv4()` 选中，覆盖了真正的 Wi-Fi（`192.168.3.46`）。后果是设备对外通告了一个同网段设备根本连不上的地址。因此地址排序还需要按"多大概率是真 LAN"分级：
+
+| 网段 | 排序 | 理由 |
+|---|---|---|
+| `192.168/16` | 0（最优） | 家用 / 小型办公 Wi-Fi 的实际默认 |
+| `10/8` | 1 | 企业 LAN 常见 |
+| `172.16/12` | 2 | Docker、WARP、大量 VPN 都蹲在这里，所以输给 10/8 |
+| 其他（公网） | 4 | 排最后但仍可用——只有公网地址的机器不该显示"无地址" |
+
+### 4.1.1 发送失败必须显式检测（实测结论）
+
+`RawDatagramSocket.send()` **失败时不一定抛异常，而是返回 0**。Windows 上实测：在真实网卡上背靠背连发 4 个 UDP 报文，约 4% 的报文根本没发出去，而 `send()` 只返回 0；报文之间间隔 1ms 后丢包完全消失。
+
+这与"必须有冗余"的设计直接相关，也是 §4.1 双通道（组播 + 广播）不能简化的原因：
+
+- 每个报文同时走组播和广播两条通道，任一条送达即成功；
+- 每 5s 重发一轮，单轮丢失只损失几秒延迟。
+
+因此实现上有两条硬性要求：
+
+1. **必须检查 `send()` 的返回值**。漏发在别处完全不可见——没有异常、没有日志，症状只是"设备列表一直是空的"，正是本节最想避免的静默失败。失败按"状态变化"记录（首次失败记一条，恢复后记一条），否则一块消失的网卡会每 5s 刷一条日志。
+2. **`_send()` 保持同步**。`stop()` 要在同一轮里先发 `bye` 再关 socket，若发送被推迟到下一个事件循环轮次，`bye` 会写进已关闭的 socket，对端就会在 60s 内一直显示本机离线。
+
+另外注意：UDP socket 收到 ICMP port-unreachable 后，Windows 会把错误"记住"，此后 `send()` 可能**持续**返回 0。这种情况下只有检查返回值才能发现问题。
 
 ### 4.2 帧格式（TCP）
 

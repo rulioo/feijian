@@ -1,12 +1,11 @@
 import 'package:feijian/app.dart';
 import 'package:feijian/core/models/peer.dart';
 import 'package:feijian/state/providers.dart';
+import 'package:feijian/ui/pages/chat_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The local-device provider reads real network interfaces. Overriding it keeps
-/// these tests deterministic and free of IO.
 const Peer _fakeSelf = Peer(
   id: 'test-self',
   name: 'Test-Box',
@@ -17,11 +16,17 @@ const Peer _fakeSelf = Peer(
   isOnline: true,
 );
 
-Widget _app() {
+/// The local-device provider reads real network interfaces, and the peer list
+/// opens real UDP sockets on port 24250. Overriding both keeps these tests
+/// deterministic, fast, and independent of whatever else is on the machine.
+Widget _app({List<Peer> peers = const <Peer>[]}) {
   return ProviderScope(
     overrides: <Override>[
       selfDeviceProvider.overrideWith((Ref ref) async => _fakeSelf),
       downloadPathProvider.overrideWith((Ref ref) async => '/tmp/Feijian'),
+      discoveredPeersProvider.overrideWith(
+        (Ref ref) => Stream<List<Peer>>.value(peers),
+      ),
     ],
     child: const FeijianApp(),
   );
@@ -57,5 +62,34 @@ void main() {
 
     expect(find.text('Settings'), findsWidgets);
     expect(find.text('Display name'), findsOneWidget);
+  });
+
+  testWidgets('lists a discovered peer and opens its conversation', (
+    WidgetTester tester,
+  ) async {
+    const Peer bob = Peer(
+      id: 'peer-bob',
+      name: 'Bob-PC',
+      deviceType: DeviceType.android,
+      icon: DeviceIcon.phone,
+      os: 'Android 14',
+      lastIp: '192.168.1.105',
+      lastPort: 24250,
+      isOnline: true,
+    );
+
+    await tester.pumpWidget(_app(peers: const <Peer>[bob]));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Bob-PC'), findsOneWidget);
+    // The empty state must be gone once anything is discovered.
+    expect(find.textContaining('Scanning for devices'), findsNothing);
+
+    await tester.tap(find.text('Bob-PC'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byType(ChatPage), findsOneWidget);
   });
 }

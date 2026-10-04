@@ -13,6 +13,7 @@ class Peer {
     required this.icon,
     this.os,
     this.lastIp,
+    this.lastPort,
     this.lastSeen,
     this.isOnline = false,
     this.isTrusted = false,
@@ -34,6 +35,15 @@ class Peer {
   final String? os;
 
   final String? lastIp;
+
+  /// The peer's TCP listen port, taken from its latest announce.
+  ///
+  /// Runtime-only: deliberately not persisted in the `peer` table (design.md
+  /// §5.1), because it is only meaningful while the peer is online and is
+  /// refreshed by every announce. A peer whose user changed the port would
+  /// otherwise be connected to at a stale address.
+  final int? lastPort;
+
   final DateTime? lastSeen;
   final bool isOnline;
 
@@ -46,6 +56,7 @@ class Peer {
     DeviceIcon? icon,
     String? os,
     String? lastIp,
+    int? lastPort,
     DateTime? lastSeen,
     bool? isOnline,
     bool? isTrusted,
@@ -57,6 +68,7 @@ class Peer {
       icon: icon ?? this.icon,
       os: os ?? this.os,
       lastIp: lastIp ?? this.lastIp,
+      lastPort: lastPort ?? this.lastPort,
       lastSeen: lastSeen ?? this.lastSeen,
       isOnline: isOnline ?? this.isOnline,
       isTrusted: isTrusted ?? this.isTrusted,

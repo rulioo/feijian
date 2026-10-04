@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../core/debug_flags.dart';
+import '../core/discovery/discovery_service.dart';
 import '../core/discovery/network_interfaces.dart';
 import '../core/models/peer.dart';
+import '../platform/device_identity.dart';
 import '../platform/download_path.dart';
 import 'settings_provider.dart';
 
@@ -12,45 +15,118 @@ import 'settings_provider.dart';
 ///
 /// Resolves the LAN address by enumerating interfaces rather than asking the
 /// OS for "the" address — see [NetworkInterfaceHelper] for why that matters.
-///
-/// TODO(M1): replace the placeholder `id` with the UUID persisted on first
-/// launch. Every connection and dedupe decision keys off it, so it must be
-/// stable across restarts.
 final FutureProvider<Peer> selfDeviceProvider = FutureProvider<Peer>((
   Ref ref,
 ) async {
   final AppSettings settings = ref.watch(settingsProvider);
   final DeviceType type = DeviceType.current;
-  final String? ip = await NetworkInterfaceHelper.primaryIpv4();
+
+  // Both are IO, and both are independent of each other.
+  final (String? ip, String id) = await (
+    NetworkInterfaceHelper.primaryIpv4(),
+    DeviceIdentity.load(),
+  ).wait;
 
   return Peer(
-    id: 'self',
+    id: id,
     name: settings.displayName ?? _hostname(),
     deviceType: type,
     icon: settings.deviceIcon ?? DeviceIcon.defaultFor(type),
     os: _osLabel(),
     lastIp: ip,
+    // Announced to peers so they know where to open the control connection.
+    // The TCP listener itself arrives in M2; until then this is the port the
+    // discovery socket is already on, which is what the design specifies.
+    lastPort: settings.listenPort,
     isOnline: true,
   );
 });
 
-/// Peers currently visible on the LAN.
+/// The LAN discovery service.
 ///
-/// TODO(M1): driven by [DiscoveryService] announce traffic. Until then this is
-/// either empty or the review-only sample set, per [kShowSamplePeers].
+/// Constructed here; started by [discoveredPeersProvider] once this device's
+/// identity resolves. Widget tests override this with a service that is never
+/// started, so the UI can be exercised without binding real UDP sockets.
+///
+/// Only the endpoint is watched, via `select`: every other setting (the display
+/// name above all) must not tear down and rebind the sockets while the user is
+/// typing.
+final Provider<DiscoveryService> discoveryServiceProvider =
+    Provider<DiscoveryService>((Ref ref) {
+      final (int, String) endpoint = ref.watch(
+        settingsProvider.select(
+          (AppSettings s) => (s.listenPort, s.multicastAddress),
+        ),
+      );
+      return DiscoveryService(
+        discoveryPort: endpoint.$1,
+        multicastGroup: endpoint.$2,
+        onLog: (String message) => debugPrint('[discovery] $message'),
+      );
+    });
+
+/// Peers currently visible on the LAN, pushed as discovery learns about them.
+///
+/// A stream rather than a watch on the service's table, so that a peer going
+/// offline on its own schedule updates the list without the UI polling.
+final StreamProvider<List<Peer>> discoveredPeersProvider =
+    StreamProvider<List<Peer>>((Ref ref) {
+      final DiscoveryService service = ref.watch(discoveryServiceProvider);
+      final StreamController<List<Peer>> out = StreamController<List<Peer>>();
+
+      final StreamSubscription<void> changes = service.changes.listen((_) {
+        if (!out.isClosed) {
+          out.add(service.table.peers);
+        }
+      });
+
+      // Renames and icon changes reach peers as soon as the user makes them.
+      ref.listen<AsyncValue<Peer>>(selfDeviceProvider, (
+        AsyncValue<Peer>? _,
+        AsyncValue<Peer> next,
+      ) {
+        final Peer? self = next.valueOrNull;
+        if (self != null) {
+          service.updateSelf(self);
+        }
+      });
+
+      unawaited(() async {
+        try {
+          service.updateSelf(await ref.read(selfDeviceProvider.future));
+          await service.start();
+          if (!out.isClosed) {
+            out.add(service.table.peers);
+          }
+        } on Object catch (error, stack) {
+          // Losing the discovery port (already in use, no permission, blocked
+          // by policy) must not take the device list down with it. The empty
+          // state that follows is already the right thing to show, and it
+          // names the firewall as a cause.
+          debugPrint('[discovery] start failed: $error\n$stack');
+          if (!out.isClosed) {
+            out.addError(error, stack);
+          }
+        }
+      }());
+
+      ref.onDispose(() {
+        unawaited(changes.cancel());
+        unawaited(service.dispose());
+        unawaited(out.close());
+      });
+
+      return out.stream;
+    });
+
+/// The discovered peers, or an empty list while discovery is still starting.
 final Provider<List<Peer>> peersProvider = Provider<List<Peer>>((Ref ref) {
-  if (kShowSamplePeers) {
-    return _samplePeers;
-  }
-  return const <Peer>[];
+  return ref.watch(discoveredPeersProvider).valueOrNull ?? const <Peer>[];
 });
 
 /// Count of reachable peers, for the list section header.
 final Provider<int> onlinePeerCountProvider = Provider<int>((Ref ref) {
-  return ref
-      .watch(peersProvider)
-      .where((Peer p) => p.isOnline)
-      .length;
+  return ref.watch(peersProvider).where((Peer p) => p.isOnline).length;
 });
 
 /// The conversation currently open. Null on a phone until a device is tapped,
@@ -84,37 +160,3 @@ String _osLabel() {
   }
   return raw;
 }
-
-/// Review-only placeholder data. **Deleted in M1** — see [kShowSamplePeers].
-final List<Peer> _samplePeers = <Peer>[
-  Peer(
-    id: 'sample-1',
-    name: 'Bob-PC',
-    deviceType: DeviceType.windows,
-    icon: DeviceIcon.desktop,
-    os: 'Windows 11',
-    lastIp: '192.168.1.101',
-    lastSeen: DateTime.now(),
-    isOnline: true,
-  ),
-  Peer(
-    id: 'sample-2',
-    name: 'Alice-Phone',
-    deviceType: DeviceType.android,
-    icon: DeviceIcon.phone,
-    os: 'Android 14',
-    lastIp: '192.168.1.105',
-    lastSeen: DateTime.now(),
-    isOnline: true,
-  ),
-  Peer(
-    id: 'sample-3',
-    name: 'Meeting-Room-PC',
-    deviceType: DeviceType.windows,
-    icon: DeviceIcon.desktop,
-    os: 'Windows 10',
-    lastIp: '192.168.1.110',
-    lastSeen: DateTime.now().subtract(const Duration(minutes: 3)),
-    isOnline: false,
-  ),
-];

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/discovery/discovery_service.dart';
 import '../../core/models/peer.dart';
 import '../../l10n/app_localizations.dart';
 import '../../state/providers.dart';
@@ -28,6 +29,7 @@ class DevicesPage extends ConsumerWidget {
     final List<Peer> peers = ref.watch(peersProvider);
     final int onlineCount = ref.watch(onlinePeerCountProvider);
     final Peer? selected = ref.watch(selectedPeerProvider);
+    final DiscoveryService discovery = ref.watch(discoveryServiceProvider);
 
     void openChat(Peer peer) {
       ref.read(selectedPeerProvider.notifier).state = peer;
@@ -45,7 +47,7 @@ class DevicesPage extends ConsumerWidget {
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: l10n.rescan,
-            onPressed: () => _notImplemented(context),
+            onPressed: discovery.rescan,
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -69,7 +71,7 @@ class DevicesPage extends ConsumerWidget {
           if (peers.isEmpty)
             EmptyState(
               onAddByIp: () => _showAddByIpDialog(context),
-              onRescan: () => _notImplemented(context),
+              onRescan: discovery.rescan,
             )
           else ...<Widget>[
             for (final Peer peer in peers)
