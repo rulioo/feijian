@@ -1,0 +1,28 @@
+# Internationalization config — design.md §8
+#
+# v1 ships English only (app_en.arb). Adding a language later means dropping in
+# a new .arb file and listing it here; no Dart code changes.
+#
+# Note: we use `synthetic-package: false` so the generated Dart lands in
+# lib/l10n/ next to the .arb sources instead of inside a hidden .dart_tool
+# package. That keeps the generated code visible and greppable, and avoids the
+# synthetic-package deprecation that breaks `flutter analyze` on newer SDKs.
+#
+# !! Flutter 3.27 quirk — running `flutter gen-l10n` standalone fails with
+# !! "Attempted to generate localizations code without having the flutter:
+# !!  generate flag turned on" even though pubspec has `generate: true` here.
+# !! Cause: generate_localizations.dart declares --synthetic-package with
+# !! defaultsTo: true, and that CLI default trips the guard in gen_l10n.dart
+# !! before l10n.yaml is consulted. Workaround — always pass the flag:
+# !!
+# !!     flutter gen-l10n --no-synthetic-package
+# !!
+# !! Normal `flutter run` / `flutter build` is unaffected: that path reads
+# !! l10n.yaml directly and generates into lib/l10n/ as configured.
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+synthetic-package: false
+nullable-getter: false
+untranslated-messages-file: l10n_missing.txt

@@ -1,0 +1,23 @@
+# Normalize line endings to LF in the repository.
+#
+# This project is developed on Windows and will later be built on macOS for
+# iOS. Without this, Windows checkouts convert LF to CRLF and every commit
+# shows whole-file diffs to anyone on a different platform.
+* text=auto eol=lf
+
+# Windows batch files must keep CRLF or cmd.exe misparses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch binaries.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.apk binary
+*.keystore binary
+*.jks binary

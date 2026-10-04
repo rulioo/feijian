@@ -1,0 +1,110 @@
+{
+  "@@locale": "en",
+
+  "appName": "Feijian",
+
+  "navDevices": "Devices",
+  "navSettings": "Settings",
+
+  "myDeviceSectionTitle": "THIS DEVICE",
+  "youLabel": "You",
+  "editDeviceName": "Change your device name",
+
+  "devicesOnNetworkCount": "{count, plural, =0{NO OTHER DEVICES} =1{ON THE NETWORK · 1} other{ON THE NETWORK · {count}}}",
+  "@devicesOnNetworkCount": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+
+  "statusOnline": "Online",
+  "statusOffline": "Offline",
+
+  "scanningTitle": "Scanning for devices on your network...",
+  "scanningHintIntro": "Make sure:",
+  "scanningHintRunning": "Other devices have Feijian running",
+  "scanningHintSameNetwork": "You are on the same Wi-Fi or LAN",
+  "scanningHintFirewall": "Your firewall allows Feijian (TCP and UDP port {port})",
+  "@scanningHintFirewall": {
+    "placeholders": {
+      "port": { "type": "int" }
+    }
+  },
+  "addDeviceByIp": "Add device by IP",
+  "rescan": "Rescan",
+  "sendFileAction": "Send a file",
+
+  "addDeviceDialogTitle": "Add device by IP",
+  "addDeviceFieldLabel": "IP address",
+  "addDeviceFieldHint": "192.168.1.100",
+  "addDeviceInvalidIp": "Enter a valid IP address",
+  "actionCancel": "Cancel",
+  "actionAdd": "Add",
+
+  "chatEmptyWithPeer": "No messages yet. Say hello to {name}.",
+  "@chatEmptyWithPeer": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "chatEmptyNoPeer": "Select a device on the left to start chatting.",
+  "composerHint": "Type a message...",
+  "attachFile": "Send a file",
+  "attachFolder": "Send a folder",
+  "sendMessage": "Send",
+  "peerOfflineNotice": "{name} is offline. Messages and files will be sent when they are back.",
+  "@peerOfflineNotice": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "backTooltip": "Back",
+  "moreActions": "More actions",
+  "viewPeerInfo": "Device info",
+  "clearHistory": "Clear history",
+
+  "settingsTitle": "Settings",
+  "settingsSectionProfile": "Profile",
+  "settingsSectionFiles": "Files",
+  "settingsSectionNetwork": "Network",
+  "settingsSectionNotifications": "Notifications",
+  "settingsSectionSystem": "System",
+  "settingsSectionLanguage": "Language",
+  "settingsSectionAbout": "About",
+
+  "settingsDisplayName": "Display name",
+  "settingsDeviceIcon": "Device icon",
+  "settingsAvatar": "Avatar",
+  "settingsDownloadFolder": "Download folder",
+  "settingsAutoAccept": "Auto-accept files",
+  "settingsAutoAcceptOff": "Ask every time",
+  "settingsAutoAcceptImages": "Accept images under {size} MB",
+  "@settingsAutoAcceptImages": {
+    "placeholders": {
+      "size": { "type": "int" }
+    }
+  },
+  "settingsAutoAcceptTrusted": "Accept everything from trusted devices",
+  "settingsListenPort": "Listen port",
+  "settingsMulticastAddress": "Multicast address",
+  "settingsEnabledInterfaces": "Network interfaces",
+  "settingsEnabledInterfacesHint": "Uncheck virtual adapters (Hyper-V, VMware, WSL) if some devices are missing from the list.",
+  "settingsNotifications": "Message notifications",
+  "settingsLaunchAtStartup": "Launch at startup",
+  "settingsMinimizeToTray": "Close to tray",
+  "settingsBackgroundService": "Stay reachable in background",
+  "settingsBackgroundServiceHint": "Shows a permanent notification. Without it, messages cannot be received while the app is in the background.",
+  "settingsLanguage": "App language",
+  "settingsVersion": "Version",
+  "settingsProtocolVersion": "Protocol version",
+  "settingsLicenses": "Open source licenses",
+
+  "deviceIconDesktop": "Desktop",
+  "deviceIconLaptop": "Laptop",
+  "deviceIconPhone": "Phone",
+  "deviceIconTablet": "Tablet",
+
+  "notImplementedTitle": "Not implemented yet",
+  "notImplementedBody": "This arrives in a later milestone.",
+  "close": "Close"
+}

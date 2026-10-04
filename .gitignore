@@ -1,0 +1,60 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Localization
+#
+# This report of untranslated strings (l10n.yaml: untranslated-messages-file)
+# is regenerated on every build, so it is not tracked.
+l10n_missing.txt
+#
+# NOTE: the generated Dart in lib/l10n/ (app_localizations*.dart) is
+# deliberately COMMITTED, unlike most generated code. Verified on Flutter
+# 3.27.4: neither `flutter pub get` nor `flutter analyze` nor `flutter build`
+# regenerates these files when they are absent — a fresh clone fails to
+# compile with 44 "Undefined name 'AppLocalizations'" errors. They are small
+# and only change when app_en.arb changes, so tracking them is the price of a
+# clone that just works.
+# Do not add lib/l10n/app_localizations*.dart here.
