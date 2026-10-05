@@ -680,13 +680,26 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 **组播锁（不做就收不到任何设备）**：
 
-```dart
-// Android 的 Wi-Fi 芯片默认过滤组播包以省电，必须显式获取 MulticastLock
-val wifi = context.getSystemService(WIFI_SERVICE) as WifiManager
-multicastLock = wifi.createMulticastLock("feijian").apply { setReferenceCounted(true) }
-multicastLock.acquire()   // DiscoveryService 启动时
-multicastLock.release()   // DiscoveryService 停止时
+```kotlin
+// MainActivity.kt —— 由 Dart 侧 lib/platform/wifi_lock.dart 通过
+// MethodChannel "com.feijian.lan/wifi_lock" 调用
+val lock = wifi.createMulticastLock("feijian").apply {
+  setReferenceCounted(false)
+  acquire()
+}
+// onDestroy 里 release 一次
 ```
+
+清单里声明 `CHANGE_WIFI_MULTICAST_STATE` 只是拿到**权限**，不等于拿到锁。没有 `acquire()` 时 Wi-Fi 固件照旧按省电策略丢弃组播帧，而 socket 层的 `joinMulticast` **仍然成功**——组也加入了、socket 也开着、任何一层都不报错，就是收不到包。这正是 §4.1.1 要防的那种静默失败。
+
+**这个 bug 真的发生过**：+3 版 APK 只声明了权限、从未 acquire，真机表现就是"点刷新、点 Rescan 都刷不出设备"。它的隐蔽之处在于代码里那句话是对的（"必需"），错的只是没有人去做。
+
+两个与直觉相反的实现选择：
+
+1. **锁在进程生命周期内一直持有，而不是 DiscoveryService 起停时配对 acquire/release。** 这个 app 的全部意义就是"察觉对面那台设备出现"，一把在轮次之间放掉的锁，恰好可能在对面 announce 的那一刻是松的。而且 `rescan()` 会重建 socket、provider 被重建会换掉整个 DiscoveryService 实例——配对调用在这种生命周期里迟早会配歪。
+2. **`setReferenceCounted(false)`，`onDestroy` 里 release 一次。** 默认的引用计数模式下，漏掉一次 release 就是永久泄漏（固件会一直为下一个进程过滤组播）；不计数则"acquire 多少次都只需 release 一次"，把配平这件事从正确性要求降级成无所谓。
+
+拿不到锁时**不能抛异常**：没有 Wi-Fi 模块的设备（模拟器走以太网）拿不到，为此拒绝启动就是把一个降级的功能换成一个打不开的 app。返回 false，日志记一条，广播通道仍然工作。
 
 **前台服务（不做就无法后台收发）**：
 Android 8+ 起，App 退到后台数分钟后会被 Doze 冻结，Socket 被挂起，组播完全收不到。必须启动前台服务并常驻通知：
@@ -958,7 +971,7 @@ feijian/
 |---|---|---|
 | **AP 隔离**（无线路由器开启客户端隔离） | 完全发现不到对方 | 空状态给出明确排查提示；提供"手动输入 IP"直连兜底；文档说明需在路由器关闭 AP 隔离 |
 | **Android 后台被冻结** | 后台收不到消息/文件 | 前台服务 + 常驻通知（必需项，非可选）；提供省电模式开关 |
-| **Android 组播锁未获取** | 收不到任何组播 | `CHANGE_WIFI_MULTICAST_STATE` + 运行时 acquire；同时发广播作为冗余通道 |
+| **Android 组播锁未获取** | 收不到任何组播 | `CHANGE_WIFI_MULTICAST_STATE` + 运行时 acquire（§7.1，已实现）；同时发广播作为冗余通道 |
 | **Windows 多虚拟网卡** | 广播发到虚拟网络，互相看不见 | 网卡名/地址段过滤 + 设置页手动勾选；单机双实例自测可提前暴露 |
 | **防火墙拦截入站** | 能发现但连不上 | 安装器预置规则（仅 private/domain）；连接失败时明确提示"请检查 Windows 防火墙" |
 | **大文件 OOM** | 应用崩溃 | 强制分块 + `flush()` 背压；代码审查禁止 `readAsBytes()` 出现在传输路径 |
