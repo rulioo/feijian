@@ -536,4 +536,109 @@ void main() {
       diagnostics: () => '  logs=${logs.join(' | ')}',
     );
   });
+
+  test('rescan rebuilds the listening socket, not just the sending ones', () async {
+    // The bug this pins down, in the user's words: after the phone had been
+    // off the network for a long stretch, neither Refresh nor Rescan would find
+    // the PC again — only killing the app would. The refresh rebuilt the
+    // senders and left the listener alone, so the multicast membership never
+    // came back, and a membership does not survive its interface going down.
+    //
+    // Restarting worked because `start` joins the group; nothing else did,
+    // because nothing else ever joined twice.
+    await startService();
+    expect(listeners(), hasLength(1));
+    final RawDatagramSocket first = listeners().single;
+
+    service.rescan();
+
+    await _waitUntil(
+      () => listeners().length == 2,
+      reason: 'a second listener to be bound',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+    expect(
+      listeners().last,
+      isNot(same(first)),
+      reason: 'a replacement socket, not another copy of the same one',
+    );
+    expect(
+      logs.any(
+        (String line) => line.contains('rejoined the group'),
+      ),
+      isTrue,
+      reason: 'and to say that the receive path was repaired',
+    );
+
+    // Still receiving on the new socket. Closing the old one cannot be asserted
+    // directly: `send` on a closed RawDatagramSocket returns 0 rather than
+    // throwing, and there is no `isClosed` to ask. What matters is that the
+    // service is listening again, which this shows by getting a datagram that
+    // only a live listener on this port could have handled.
+    peer.received.clear();
+    await peer.send(_announce(port: peer.port), port);
+    await _waitUntil(
+      () => service.table.length == 1,
+      reason: 'a peer learned after the listener was rebuilt',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+  });
+
+  test('a stop that lands mid-rebind leaves no socket open behind it', () async {
+    // `_rebindAll` crosses several awaits — enumerating interfaces, cancelling
+    // the old subscription, binding the replacement — and `stop()` can land in
+    // any of them. A socket bound *after* the service stopped is one nothing
+    // will ever close, and the next `start()` would find its own port taken.
+    //
+    // The window is hit deliberately rather than hoped for: the injected binder
+    // waits, so `stop()` arrives while the replacement is still being bound.
+    final int slowPort = await _servicePort();
+    final List<String> slowLogs = <String>[];
+    final List<RawDatagramSocket> slowBound = <RawDatagramSocket>[];
+    final DiscoveryService slow = DiscoveryService(
+      discoveryPort: slowPort,
+      onLog: slowLogs.add,
+      bind: (InternetAddress address, int atPort) async {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        slowBound.add(socket);
+        return socket;
+      },
+    );
+    addTearDown(slow.dispose);
+    slow.updateSelf(_self);
+    await slow.start();
+    final int afterStart = slowBound.length;
+
+    slow.rescan();
+    await slow.stop();
+    // Long enough for every bind the refresh started to have completed.
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(
+      slowBound.length,
+      greaterThan(afterStart),
+      reason: 'the rebind really did run — otherwise this proves nothing',
+    );
+
+    // `send` on a closed RawDatagramSocket returns 0; on an open one it returns
+    // the byte count. That asymmetry is the only way to ask, since there is no
+    // `isClosed` — and it is the same silent-0 behaviour the announce path is
+    // written around. A non-zero result is proof of a leak; a zero is taken at
+    // face value, which can only ever miss one, never invent one.
+    final List<RawDatagramSocket> leaked = <RawDatagramSocket>[
+      for (final RawDatagramSocket socket in slowBound)
+        if (socket.send(<int>[0], InternetAddress('127.0.0.1'), 9) > 0) socket,
+    ];
+    expect(
+      leaked,
+      isEmpty,
+      reason: 'stop() closed everything the refresh had already bound\n'
+          '  logs=${slowLogs.join(' | ')}',
+    );
+  });
 }

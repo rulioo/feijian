@@ -68,6 +68,36 @@ class DiscoveryService implements PeerSource {
   @override
   List<Peer> get peers => table.peers;
 
+  @override
+  bool addManual(Peer peer) {
+    if (!table.addManual(peer)) {
+      return false;
+    }
+    _notify();
+    return true;
+  }
+
+  @override
+  bool isManual(String id) => table.isManual(id);
+
+  @override
+  bool setOnline(String id, {required bool isOnline}) {
+    if (!table.setOnline(id, isOnline: isOnline)) {
+      return false;
+    }
+    _notify();
+    return true;
+  }
+
+  @override
+  bool forget(String id) {
+    if (!table.forget(id)) {
+      return false;
+    }
+    _notify();
+    return true;
+  }
+
   final int _discoveryPort;
   final DatagramBinder _bind;
   final InternetAddress _multicast;
@@ -187,16 +217,7 @@ class DiscoveryService implements PeerSource {
     final Map<NetworkInterface, List<String>> interfaces =
         await NetworkInterfaceHelper.usableInterfaces();
 
-    // Joining per interface rather than once implicitly: an implicit join
-    // follows the default route, which is what pulls multicast in from a
-    // virtual adapter we deliberately excluded.
-    for (final NetworkInterface ni in interfaces.keys) {
-      try {
-        receiver.joinMulticast(_multicast, ni);
-      } on SocketException catch (error) {
-        _log('multicast join failed on ${ni.name}: ${error.message}');
-      }
-    }
+    _joinGroup(receiver, interfaces);
 
     _replySocket = await _bindReplySocket();
 
@@ -277,11 +298,23 @@ class DiscoveryService implements PeerSource {
     }
   }
 
-  /// Closes every sending socket and binds replacements.
+  /// Closes every socket and binds replacements — in both directions.
   ///
-  /// The listener is deliberately left alone: it never sends, so it cannot
-  /// latch, and rebinding it would mean rejoining the multicast group on every
-  /// interface for no gain.
+  /// The listener used to be left alone here, on the reasoning that it never
+  /// sends and so cannot latch, and that rebuilding it would cost a multicast
+  /// rejoin for no gain. **Both halves of that were wrong**, and the cost was a
+  /// Refresh and a Rescan that could not recover from the one failure users
+  /// actually hit.
+  ///
+  /// A multicast membership belongs to the interface it was made on, and the
+  /// kernel drops it when that interface goes down — Wi-Fi sleeping through a
+  /// long idle stretch, the phone roaming, the adapter resetting. Nothing
+  /// reports it: the socket stays open, the join succeeded when it was made,
+  /// and the only symptom is that announcements stop arriving. The senders are
+  /// not what broke, so repairing them changes nothing, and re-announcing is
+  /// likewise a no-op — the group we are sending to is not the group we are
+  /// listening on. Restarting the process worked because [start] rejoins;
+  /// nothing else did, because nothing else ever joined twice.
   Future<void> _rebindAll() async {
     final List<RawDatagramSocket> stale = List<RawDatagramSocket>.of(_senders);
     _senders.clear();
@@ -293,6 +326,9 @@ class DiscoveryService implements PeerSource {
     _replySocket?.close();
     _replySocket = await _bindReplySocket();
 
+    // Enumerated once and used for both halves: the interfaces worth sending
+    // on are exactly the ones worth listening on, and a second enumeration
+    // could disagree with this one if the network moved in between.
     final Map<NetworkInterface, List<String>> interfaces =
         await NetworkInterfaceHelper.usableInterfaces();
     for (final MapEntry<NetworkInterface, List<String>> entry
@@ -306,6 +342,8 @@ class DiscoveryService implements PeerSource {
       }
     }
 
+    await _rebindListener(interfaces);
+
     if (!_started) {
       // stop() ran while the sockets were being bound. Close what was just
       // made rather than leaving live sockets behind a stopped service.
@@ -315,6 +353,94 @@ class DiscoveryService implements PeerSource {
       _senders.clear();
       _replySocket?.close();
       _replySocket = null;
+    }
+  }
+
+  /// Replaces the listening socket and rejoins the group on every interface.
+  ///
+  /// The old socket is closed *before* the replacement is bound, not after.
+  /// Both binds pass `reuseAddress`, so a second socket on the same port would
+  /// not fail — it would silently take half the traffic, and which half is the
+  /// kernel's business. A listener that is absent for the few milliseconds the
+  /// rebind takes is the cheaper mistake by a wide margin: announces repeat
+  /// every [kAnnounceInterval], the refresh sends [_refreshRounds] rounds, and
+  /// the senders are already rebound and working throughout.
+  Future<void> _rebindListener(
+    Map<NetworkInterface, List<String>> interfaces,
+  ) async {
+    if (!_started) {
+      return;
+    }
+    final RawDatagramSocket? previous = _receiver;
+    final StreamSubscription<RawSocketEvent>? previousSub = _receiverSub;
+    _receiver = null;
+    _receiverSub = null;
+
+    await previousSub?.cancel();
+    previous?.close();
+
+    final RawDatagramSocket receiver;
+    try {
+      receiver = await _bind(InternetAddress.anyIPv4, _discoveryPort);
+    } on SocketException catch (error) {
+      // Degraded rather than repaired: nothing is listening any more. Loud,
+      // because the way out is for the user to press Rescan again and there is
+      // no other sign that anything went wrong.
+      _log('could not rebind the listener on $_discoveryPort: ${error.message}');
+      return;
+    }
+
+    if (!_started) {
+      // stop() ran during the bind. Same rule as everywhere else: a socket
+      // created after the service stopped must not be left open.
+      receiver.close();
+      return;
+    }
+
+    receiver.broadcastEnabled = true;
+    _receiver = receiver;
+    _receiverSub = receiver.listen(
+      _onSocketEvent,
+      onError: (Object error) => _log('receive error: $error'),
+      cancelOnError: false,
+    );
+    _joinGroup(receiver, interfaces);
+    // The one line that says the receive path was repaired rather than assumed.
+    // Without it, a refresh that fixed nothing looks identical in the log to
+    // one that fixed everything.
+    _log('rebuilt the listener on $_discoveryPort and rejoined the group on '
+        '${interfaces.length} interface(s)');
+  }
+
+  /// Joins the group on every usable interface.
+  ///
+  /// Per interface rather than once implicitly: an implicit join follows the
+  /// default route, which is what pulls multicast in from a virtual adapter we
+  /// deliberately excluded.
+  ///
+  /// Called from [start] and again from every refresh, because a membership is
+  /// not a property of the socket — see [_rebindAll] for what drops it.
+  void _joinGroup(
+    RawDatagramSocket receiver,
+    Map<NetworkInterface, List<String>> interfaces,
+  ) {
+    // The receiver must still be the one this service listens on. Both callers
+    // cross an `await` between binding and joining (enumerating the interfaces,
+    // or cancelling the old subscription), and `stop()` can run in that window
+    // and close the socket. Joining a closed socket does not throw and does not
+    // return — it walks into `_NativeSocket.nativeJoinMulticast` and takes the
+    // whole VM down with a segfault, verified on Dart 3.6.2 / Windows x64. A
+    // guard here is the difference between a missed join and a crash on the way
+    // out of the app.
+    if (!identical(receiver, _receiver)) {
+      return;
+    }
+    for (final NetworkInterface ni in interfaces.keys) {
+      try {
+        receiver.joinMulticast(_multicast, ni);
+      } on SocketException catch (error) {
+        _log('multicast join failed on ${ni.name}: ${error.message}');
+      }
     }
   }
 
