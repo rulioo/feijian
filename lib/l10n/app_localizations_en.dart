@@ -89,6 +89,40 @@ class AppLocalizationsEn extends AppLocalizations {
   String get actionAdd => 'Add';
 
   @override
+  String addDeviceConnecting(String target) {
+    return 'Connecting to $target...';
+  }
+
+  @override
+  String addDeviceAdded(String name) {
+    return 'Added $name';
+  }
+
+  @override
+  String addDeviceUnreachable(String target) {
+    return 'Could not reach a device at $target. Check that Feijian is running on it and that its address has not changed.';
+  }
+
+  @override
+  String get addDeviceSelf => 'That address is this device.';
+
+  @override
+  String get addDeviceOffline => 'Cannot add a device: the network service is not running.';
+
+  @override
+  String get removeDevice => 'Remove device';
+
+  @override
+  String removeDeviceConfirm(String name) {
+    return 'Remove $name from the device list? The conversation stays on this device.';
+  }
+
+  @override
+  String deviceRemoved(String name) {
+    return 'Removed $name';
+  }
+
+  @override
   String chatEmptyWithPeer(String name) {
     return 'No messages yet. Say hello to $name.';
   }

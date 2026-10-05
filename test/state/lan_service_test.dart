@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:drift/drift.dart' show driftRuntimeOptions;
 import 'package:feijian/core/constants.dart';
@@ -328,6 +329,136 @@ void main() {
       );
     });
   });
+
+  group('Add by IP (§4.1)', () {
+    /// The situation this feature exists for: the peer is up and listening, and
+    /// no announce from it has ever arrived.
+    Future<DialResult> dialB() =>
+        a.service.addPeerByAddress(InternetAddress.loopbackIPv4, port: b.port);
+
+    test('reaches a device that never announced', () async {
+      expect(a.source.peers, isEmpty, reason: 'nothing was heard on the network');
+
+      final DialResult result = await dialB();
+
+      expect(result.isConnected, isTrue);
+      expect(result.hello!.deviceId, b.id);
+      expect(result.hello!.name, 'Phone');
+      expect(a.source.isManual(b.id), isTrue);
+
+      final List<Peer> listed = a.source.peers;
+      expect(listed.map((Peer peer) => peer.id), <String>[b.id]);
+      expect(listed.single.name, 'Phone');
+      expect(listed.single.lastIp, '127.0.0.1');
+      expect(listed.single.lastPort, b.port);
+      expect(listed.single.isOnline, isTrue);
+      // A `hello` carries no OS string and there is no announce to take one
+      // from, so the list is left to show the address alone rather than guess.
+      expect(listed.single.os, isNull);
+    });
+
+    test('the device is a peer like any other once it is added', () async {
+      await dialB();
+      await waitUntil(() => a.service.isConnected(b.id), describe: 'the link');
+
+      // Written to the database by the same path an announce takes, so a manual
+      // device survives a restart of the app rather than of the session.
+      final Peer? stored = await waitForValue<Peer?>(
+        () => a.peers.byId(b.id),
+        (Peer? peer) => peer != null,
+        describe: 'b to be written to a\'s device list',
+      );
+      expect(stored!.name, 'Phone');
+      expect(stored.lastIp, '127.0.0.1');
+
+      await a.service.sendText(peerId: b.id, text: 'first contact');
+      final List<Message> received = await waitForValue(
+        () => historyOf(b, a),
+        (List<Message> rows) => rows.isNotEmpty,
+        describe: 'b to store the message',
+      );
+      expect(received.single.text, 'first contact');
+    });
+
+    test('an address that leads nowhere is reported, and adds nothing', () async {
+      final int dead = await freePort();
+
+      final DialResult result =
+          await a.service.addPeerByAddress(InternetAddress.loopbackIPv4, port: dead);
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.unreachable);
+      expect(
+        a.source.peers,
+        isEmpty,
+        reason: 'a dial that failed is not a device the user added',
+      );
+    });
+
+    test('this device\'s own address is refused', () async {
+      final DialResult result =
+          await a.service.addPeerByAddress(InternetAddress.loopbackIPv4, port: a.port);
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.thisDevice);
+      expect(a.source.peers.isEmpty, isTrue);
+    });
+
+    test('a peer that goes quiet stays on the list, greyed out', () async {
+      // The deliberate difference from an announced peer: a hand-entered one
+      // never announces, so nothing would bring it back if a dropped connection
+      // deleted it. It is the user's entry, and only the user removes it.
+      await dialB();
+      await waitUntil(
+        () => a.source.peers.any((Peer p) => p.id == b.id && p.isOnline),
+        describe: 'the peer to be shown online',
+      );
+
+      await b.service.manager.dispose();
+
+      await waitUntil(
+        () => a.source.peers.any((Peer p) => p.id == b.id && !p.isOnline),
+        describe: 'the peer to be shown offline',
+      );
+      expect(a.source.isManual(b.id), isTrue);
+      expect(a.source.peers.map((Peer p) => p.id), contains(b.id));
+    });
+
+    test('forgetPeer takes it off the list and drops the connection', () async {
+      await dialB();
+      await waitUntil(() => a.service.isConnected(b.id), describe: 'the link');
+
+      await a.service.forgetPeer(b.id);
+
+      expect(a.source.peers, isEmpty);
+      expect(a.source.isManual(b.id), isFalse);
+      expect(a.service.isConnected(b.id), isFalse);
+      // And the far end notices rather than holding half a conversation.
+      await waitUntil(
+        () => !b.service.isConnected(a.id),
+        describe: 'b to see the connection go',
+      );
+    });
+
+    test('forgetPeer leaves the conversation where it is', () async {
+      await dialB();
+      await waitUntil(() => a.service.isConnected(b.id), describe: 'the link');
+      await a.service.sendText(peerId: b.id, text: 'keep this');
+      await waitForValue(
+        () => historyOf(a, b),
+        (List<Message> rows) => rows.isNotEmpty,
+        describe: 'a to hold the message',
+      );
+
+      await a.service.forgetPeer(b.id);
+
+      // Removing a device and clearing a history are separate intentions. The
+      // rows are this device's record of what was said, not a property of the
+      // peer still being on the list.
+      final List<Message> kept = await historyOf(a, b);
+      expect(kept.single.text, 'keep this');
+    });
+  });
 }
 
 /// The text of every message in [rows].
@@ -444,18 +575,69 @@ class _FakeAnnounces implements PeerSource {
   final StreamController<void> _changes = StreamController<void>.broadcast();
   final Map<String, Peer> _peers = <String, Peer>{};
 
+  /// Mirrors `PeerTable._manual`, and deliberately nothing more. The ageing
+  /// rules themselves are exercised against the real table in
+  /// `peer_table_test.dart`; what these tests need from the fake is only that a
+  /// manual peer can be told apart from an announced one.
+  final Set<String> _manual = <String>{};
+
   @override
   Stream<void> get changes => _changes.stream;
 
   @override
   List<Peer> get peers => _peers.values.toList(growable: false);
 
+  @override
+  bool addManual(Peer peer) {
+    final bool isNew = !_peers.containsKey(peer.id);
+    _manual.add(peer.id);
+    _peers[peer.id] = peer;
+    _notify();
+    return isNew;
+  }
+
+  @override
+  bool isManual(String id) => _manual.contains(id);
+
+  @override
+  bool setOnline(String id, {required bool isOnline}) {
+    // Manual peers only, as in the real table: this is the Add-by-IP path's
+    // substitute for an announce, not a second opinion on an announced peer.
+    if (!_manual.contains(id)) {
+      return false;
+    }
+    final Peer? peer = _peers[id];
+    if (peer == null || peer.isOnline == isOnline) {
+      return false;
+    }
+    _peers[id] = peer.copyWith(isOnline: isOnline);
+    _notify();
+    return true;
+  }
+
+  @override
+  bool forget(String id) {
+    _manual.remove(id);
+    final bool removed = _peers.remove(id) != null;
+    if (removed) {
+      _notify();
+    }
+    return removed;
+  }
+
   void announce(Peer peer) {
     _peers[peer.id] = peer;
+    // An announce supersedes a hand-typed entry, exactly as `PeerTable.touch`
+    // does: the device is reachable the ordinary way after all.
+    _manual.remove(peer.id);
+    _notify();
+  }
+
+  Future<void> close() => _changes.close();
+
+  void _notify() {
     if (!_changes.isClosed) {
       _changes.add(null);
     }
   }
-
-  Future<void> close() => _changes.close();
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
+import '../core/constants.dart';
 import '../core/discovery/peer_source.dart';
 import '../core/models/message.dart';
 import '../core/models/peer.dart';
@@ -105,12 +106,19 @@ class LanService {
       manager.deliveryFailed
           .listen((MessageDeliveryFailed f) => unawaited(_onFailed(f))),
       manager.peerConnected.listen((String peerId) {
+        // A hand-entered peer has no announces to say whether it is up, so its
+        // connection is the only evidence there is. A no-op for every other
+        // peer: the network is a better authority on those.
+        discovery.setOnline(peerId, isOnline: true);
         // §5.2: a control connection coming up is one of the two moments the
         // offline queue is flushed, the other being a fresh announce.
         unawaited(_flushPending(peerId));
         _emitOnline();
       }),
-      manager.peerLost.listen((PeerConnectionLost lost) => _emitOnline()),
+      manager.peerLost.listen((PeerConnectionLost lost) {
+        discovery.setOnline(lost.peerId, isOnline: false);
+        _emitOnline();
+      }),
       discovery.changes.listen((void _) => unawaited(_absorbAnnounces())),
     ]);
 
@@ -170,6 +178,72 @@ class LanService {
   }
 
   bool isConnected(String peerId) => manager.isConnected(peerId);
+
+  /// Reaches the device at [address] and puts it in the device list.
+  ///
+  /// The Add-by-IP escape hatch (design.md §4.1). It exists for the network
+  /// where nothing else works: a router with AP isolation drops the multicast
+  /// announce, so discovery never sees the device, no amount of rescanning finds
+  /// it, and a typed address is the only way in.
+  ///
+  /// Nothing downstream is special-cased. The address is dialled over the
+  /// ordinary control protocol, and once it answers the peer is registered with
+  /// the manager exactly as an announced one would be — messages, retries and
+  /// reconnects all work unchanged, and the only difference is where the peer's
+  /// id and address came from.
+  ///
+  /// That is why this returns the dial's own result rather than a bool: the
+  /// caller is the one turning it into a sentence for the user, and the three
+  /// failures need three different sentences.
+  Future<DialResult> addPeerByAddress(
+    InternetAddress address, {
+    int port = kDiscoveryPort,
+  }) async {
+    if (_disposed) {
+      return const DialResult.failed(DialProblem.unreachable);
+    }
+
+    final DialResult result = await manager.connectToAddress(address, port: port);
+    final HelloPayload? hello = result.hello;
+    if (hello == null) {
+      return result;
+    }
+
+    discovery.addManual(Peer(
+      id: hello.deviceId,
+      name: hello.name,
+      deviceType: hello.deviceType,
+      icon: hello.icon,
+      // A `hello` carries no OS string (design.md §4.3) and there is no announce
+      // to take one from, so this stays null and the list shows the address
+      // alone. Inferring one from `deviceType` would be a guess dressed as a
+      // fact.
+      lastIp: address.address,
+      lastPort: hello.port,
+      // Read back from the manager rather than assumed: this is the socket that
+      // established the peer, and whether it counts as connected is the
+      // manager's call, not this method's.
+      isOnline: manager.isConnected(hello.deviceId),
+    ));
+    return result;
+  }
+
+  /// Takes a device off the list, and stops keeping a connection to it.
+  ///
+  /// Needed because a hand-entered peer is exempt from the ageing rules, so
+  /// nothing else can remove it — see [PeerSource.forget].
+  ///
+  /// The conversation is deliberately left where it is. Those messages are this
+  /// device's record of what was said, not a property of the peer still being
+  /// on the list, and the same is already true of a peer that ages out. Removing
+  /// a device and clearing a history are separate intentions and stay separate.
+  Future<void> forgetPeer(String peerId) async {
+    discovery.forget(peerId);
+    // Forgotten so that re-adding the same device writes it afresh instead of
+    // being compared against the fingerprint of the entry just removed.
+    _recorded.remove(peerId);
+    await manager.release(peerId);
+  }
 
   /// Makes sure a connection to [peerId] is kept alive.
   ///

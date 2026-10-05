@@ -4,6 +4,7 @@ import 'package:feijian/core/protocol/payloads.dart';
 import 'package:feijian/core/transport/connection_manager.dart';
 import 'package:feijian/core/transport/connection_state.dart';
 import 'package:feijian/core/transport/feijian_server.dart';
+import 'package:feijian/core/transport/transport_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'transport_harness.dart';
@@ -354,7 +355,21 @@ void main() {
       final Peers peers = await connectedPeers();
       addTearDown(peers.dispose);
 
+      // Cleared *before* the goodbye, not after seeing it. `_onClosed` schedules
+      // the retry and logs it in the same synchronous block that reports the
+      // loss, so by the time the `peerLost` event has been delivered — one
+      // microtask later — the line is already here, and clearing then would
+      // delete the very thing being waited for.
+      //
+      // Worth spelling out because it went unnoticed for a while: this used to
+      // pass anyway, on a second `retrying` logged when the retry failed. The
+      // retry dials `kDiscoveryPort` (the hello's port wins over the port that
+      // was dialled), so all it took to turn this test red was something
+      // listening on 24250 — the app itself, or the Windows build left running
+      // after a manual check. A test must not depend on that port being free.
+      logs.clear();
       peers.b.disconnect(kIdA);
+
       await waitUntil(
         () => peers.lostAtA.isNotEmpty,
         describe: 'a to see the goodbye',
@@ -367,7 +382,9 @@ void main() {
         ),
       );
 
-      logs.clear();
+      // The state-level half of the same claim, and the one with no timing in
+      // it at all: the peer is still one the manager wants to reach.
+      expect(peers.a.isWanted(kIdB), isTrue);
       await waitUntil(
         () => logs.any((String l) => l.contains('retrying')),
         describe: 'a retry to be scheduled despite the goodbye',
@@ -395,6 +412,146 @@ void main() {
 
       expect(logs.where((String l) => l.contains('could not reach')), isEmpty);
       expect(a.isWanted(kIdB), isFalse);
+    });
+  });
+
+  group('Add by IP (design.md §4.1)', () {
+    test('reaches a device that never announced, and returns what it is', () async {
+      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager b = managerFor(kIdB);
+      addTearDown(a.dispose);
+      addTearDown(b.dispose);
+      await a.start();
+      await b.start();
+
+      // No discovery, no announce, no prior knowledge of the id — which is the
+      // whole point: behind AP isolation this is the only way to learn it.
+      final DialResult result = await a.connectToAddress(
+        InternetAddress.loopbackIPv4,
+        port: b.boundPort!,
+      );
+
+      expect(result.isConnected, isTrue);
+      expect(result.problem, isNull);
+      expect(result.hello!.deviceId, kIdB);
+      expect(result.hello!.name, kIdB);
+
+      // And it is a first-class peer from here on: announces would land on the
+      // same entry, and a message goes out over this connection.
+      expect(a.isConnected(kIdB), isTrue);
+      expect(a.isWanted(kIdB), isTrue);
+      expect(a.sendMessage(kIdB, message('after-add')), isTrue);
+    });
+
+    test('reports nothing answered when no one is listening', () async {
+      final int port = await freePort();
+      final ConnectionManager a = managerFor(kIdA);
+      addTearDown(a.dispose);
+      await a.start();
+
+      final DialResult result =
+          await a.connectToAddress(InternetAddress.loopbackIPv4, port: port);
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.unreachable);
+      expect(result.hello, isNull);
+    });
+
+    test('reports this device when the address is our own', () async {
+      final ConnectionManager a = managerFor(kIdA);
+      addTearDown(a.dispose);
+      await a.start();
+
+      // Reachable, and not a peer: a user who mistyped their own address out of
+      // the list needs to hear that, not "nothing answered".
+      final DialResult result = await a.connectToAddress(
+        InternetAddress.loopbackIPv4,
+        port: a.boundPort!,
+      );
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.thisDevice);
+    });
+
+    test('a peer that hangs up during the handshake reports unreachable', () async {
+      // A raw listener that accepts the socket and then drops it, without ever
+      // sending a `hello`. The dial gets a connection and no peer out of it, and
+      // the advice for the user is the same as for a port with nothing on it.
+      final ServerSocket rude = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(rude.close);
+      rude.listen((Socket socket) => socket.destroy());
+
+      final ConnectionManager a = managerFor(kIdA);
+      addTearDown(a.dispose);
+      await a.start();
+
+      final DialResult result = await a.connectToAddress(
+        InternetAddress.loopbackIPv4,
+        port: rude.port,
+      );
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.unreachable);
+    });
+
+    test('gives up on a port that accepts but never greets', () async {
+      // What a different program holding the port looks like. The handshake
+      // timeout is set far beyond the dial timeout here, so the only thing that
+      // can end this is `connectToAddress`'s own `timeout` — otherwise the test
+      // would pass on the connection's timer and never cover the parameter.
+      final ServerSocket silent = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(silent.close);
+      silent.listen((Socket socket) => addTearDown(socket.destroy));
+
+      final ConnectionManager a = ConnectionManager(
+        selfHello: helloFor(kIdA),
+        port: 0,
+        tuning: const TransportTuning(
+          handshakeTimeout: Duration(seconds: 30),
+          idleTimeout: Duration(seconds: 30),
+          connectTimeout: Duration(seconds: 5),
+          closeFlushTimeout: Duration(milliseconds: 500),
+          ackTimeout: Duration(seconds: 1),
+          maxRetries: 1,
+          backoff: <Duration>[Duration(milliseconds: 40)],
+        ),
+        onLog: logs.add,
+      );
+      addTearDown(a.dispose);
+      await a.start();
+
+      final DialResult result = await a.connectToAddress(
+        InternetAddress.loopbackIPv4,
+        port: silent.port,
+        timeout: const Duration(milliseconds: 200),
+      );
+
+      expect(result.isConnected, isFalse);
+      expect(result.problem, DialProblem.unreachable);
+    });
+
+    test('a dial to a peer we are already connected to is not a failure', () async {
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      // §4.4 keeps one socket per peer, so this dial loses the tie-break and is
+      // closed. The device is still reached, by the socket that was kept, and
+      // telling the user "could not add" for a device that is plainly connected
+      // would be the wrong answer to the question they asked.
+      final DialResult result = await peers.a.connectToAddress(
+        InternetAddress.loopbackIPv4,
+        port: peers.b.boundPort!,
+      );
+
+      expect(result.isConnected, isTrue);
+      expect(result.hello!.deviceId, kIdB);
+      expect(peers.a.isConnected(kIdB), isTrue);
     });
   });
 

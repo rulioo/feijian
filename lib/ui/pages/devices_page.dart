@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/constants.dart';
 import '../../core/discovery/discovery_service.dart';
 import '../../core/models/peer.dart';
+import '../../core/transport/connection_manager.dart';
 import '../../l10n/app_localizations.dart';
 import '../../state/chat_provider.dart';
 import '../../state/lan_provider.dart';
+import '../../state/lan_service.dart';
 import '../../state/providers.dart';
 import '../ui_constants.dart';
 import '../widgets/device_tile.dart';
@@ -84,7 +88,7 @@ class DevicesPage extends ConsumerWidget {
           const SizedBox(height: 8),
           if (peers.isEmpty)
             EmptyState(
-              onAddByIp: () => _showAddByIpDialog(context),
+              onAddByIp: () => unawaited(_showAddByIpDialog(context, ref)),
               onRescan: discovery.rescan,
             )
           else ...<Widget>[
@@ -102,7 +106,7 @@ class DevicesPage extends ConsumerWidget {
             const SizedBox(height: 20),
             Center(
               child: TextButton.icon(
-                onPressed: () => _showAddByIpDialog(context),
+                onPressed: () => unawaited(_showAddByIpDialog(context, ref)),
                 icon: const Icon(Icons.add, size: 18),
                 label: Text(l10n.addDeviceByIp),
               ),
@@ -148,8 +152,10 @@ class _SectionLabel extends StatelessWidget {
 /// Manual peer entry — the escape hatch for networks where multicast and
 /// broadcast are both blocked (AP isolation, hardened corporate Wi-Fi).
 ///
-/// The validation is real; the connect step lands with the transport in M2.
-Future<void> _showAddByIpDialog(BuildContext context) async {
+/// Validation is local; the dial is not. An address that passes here is
+/// well-formed, which is a different question from whether anything is listening
+/// on it, and only the network can answer the second one.
+Future<void> _showAddByIpDialog(BuildContext context, WidgetRef ref) async {
   final AppLocalizations l10n = AppLocalizations.of(context);
   final TextEditingController controller = TextEditingController();
   final GlobalKey<FormState> formKey = GlobalKey<FormState>();
@@ -209,9 +215,104 @@ Future<void> _showAddByIpDialog(BuildContext context) async {
 
   controller.dispose();
 
-  if (result != null && context.mounted) {
-    _notImplemented(context);
+  if (result == null || !context.mounted) {
+    return;
   }
+  final InternetAddress? address = InternetAddress.tryParse(result);
+  if (address == null) {
+    // Unreachable through the dialog, whose validator already rejected this.
+    // Said out loud rather than dialled as nothing: two checks disagreeing is a
+    // bug, and a silent no-op is the hardest kind to notice.
+    _snack(context, l10n.addDeviceInvalidIp);
+    return;
+  }
+  await _addPeer(context, ref, address);
+}
+
+/// Dials a typed-in address and reports what came of it.
+///
+/// A modal rather than a snackbar. A refused port answers in milliseconds, but a
+/// *filtered* one — the case this feature exists for — takes the full handshake
+/// timeout, and without a spinner that is indistinguishable from the button
+/// having done nothing at all. `PopScope` keeps it from being dismissed while
+/// the dial is still in flight, which would leave the result with nowhere to go.
+Future<void> _addPeer(
+  BuildContext context,
+  WidgetRef ref,
+  InternetAddress address,
+) async {
+  final AppLocalizations l10n = AppLocalizations.of(context);
+  final String target = '${address.address}:$kDiscoveryPort';
+  final NavigatorState navigator = Navigator.of(context, rootNavigator: true);
+
+  unawaited(showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (BuildContext _) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: <Widget>[
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 20),
+            Expanded(child: Text(l10n.addDeviceConnecting(target))),
+          ],
+        ),
+      ),
+    ),
+  ));
+
+  String message;
+  try {
+    // Awaited rather than read: on a cold start the service is still binding its
+    // sockets, and "not running" would be a wrong answer to a question that just
+    // needed asking a moment later.
+    final LanService lan = await ref.read(lanServiceProvider.future);
+    final DialResult result = await lan.addPeerByAddress(address);
+    message = result.isConnected
+        ? l10n.addDeviceAdded(result.hello!.name)
+        : _addFailureMessage(l10n, result.problem!, target);
+  } on Object catch (error) {
+    debugPrint('[add-device] $error');
+    message = l10n.addDeviceOffline;
+  }
+
+  if (navigator.mounted) {
+    navigator.pop();
+  }
+  if (context.mounted) {
+    _snack(context, message);
+  }
+}
+
+/// One sentence per failure, because they call for two different next moves: an
+/// address that led nowhere needs checking against the other device, while this
+/// device's own address needs the user to read the list again.
+String _addFailureMessage(
+  AppLocalizations l10n,
+  DialProblem problem,
+  String target,
+) {
+  return switch (problem) {
+    DialProblem.unreachable => l10n.addDeviceUnreachable(target),
+    DialProblem.thisDevice => l10n.addDeviceSelf,
+  };
+}
+
+void _snack(BuildContext context, String message) {
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
 }
 
 void _notImplemented(BuildContext context) {

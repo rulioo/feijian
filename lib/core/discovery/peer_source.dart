@@ -15,4 +15,24 @@ abstract interface class PeerSource {
 
   /// The peers, ordered for display.
   List<Peer> get peers;
+
+  /// Adds a peer the user entered by hand — the Add-by-IP escape hatch
+  /// (design.md §4.1).
+  ///
+  /// The one write the layers above discovery need to make, and the reason this
+  /// is a seam and not a read-only view. Everything else a peer is comes off the
+  /// network; a typed address is the exception, and the ageing rules have to be
+  /// told about it or they delete it within the minute — see `PeerTable`. The
+  /// implementation emits [changes] when the displayed list changes.
+  bool addManual(Peer peer);
+
+  /// True when [id] was entered by hand and has not announced since.
+  bool isManual(String id);
+
+  /// Sets whether a manual peer is reachable, from the connection state.
+  bool setOnline(String id, {required bool isOnline});
+
+  /// Forgets a peer the user removed by hand. Manual peers are exempt from
+  /// ageing, so this is the only thing that takes one off the list.
+  bool forget(String id);
 }

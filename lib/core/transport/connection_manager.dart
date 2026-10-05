@@ -45,6 +45,41 @@ class MessageDeliveryFailed {
   final int attempts;
 }
 
+/// Why a dialled connection produced no peer — see
+/// [ConnectionManager.connectToAddress].
+///
+/// Two outcomes rather than one because they call for two different next moves.
+/// "Could not connect" would send a user who mistyped their own address out
+/// looking for a device that is sitting in front of them.
+enum DialProblem {
+  /// No usable control connection came out of that address: nothing was
+  /// listening, something accepted but never spoke the protocol, or it hung up
+  /// before the handshake finished. All three look the same from here and are
+  /// fixed the same way — check that the other device has the app running and
+  /// that the address is still right.
+  unreachable,
+
+  /// The address answered as this device.
+  thisDevice,
+}
+
+/// The outcome of [ConnectionManager.connectToAddress].
+class DialResult {
+  const DialResult._(this.hello, this.problem);
+
+  const DialResult.connected(HelloPayload hello) : this._(hello, null);
+
+  const DialResult.failed(DialProblem problem) : this._(null, problem);
+
+  /// What the peer said about itself, when the dial produced a live connection.
+  final HelloPayload? hello;
+
+  /// Why it did not, when it did not.
+  final DialProblem? problem;
+
+  bool get isConnected => hello != null;
+}
+
 /// A peer's connection went away.
 ///
 /// Worth surfacing because the queue behaves differently depending on why: a
@@ -247,6 +282,142 @@ class ConnectionManager {
       return;
     }
     unawaited(_connect(peer));
+  }
+
+  /// Dials [address] directly and reports what answered.
+  ///
+  /// The Add-by-IP path (design.md §4.1). It is separate from
+  /// [requireConnection] because the caller has no device id to key the request
+  /// on — the id is the *result* of this call, not its input. A router with AP
+  /// isolation drops multicast, so discovery never sees the device and there is
+  /// nothing to key on until a connection has been made; this is the only way in.
+  ///
+  /// On success the peer is registered exactly as an announce-driven one would
+  /// be, so announces, retries after a drop and message sends all work
+  /// unchanged. The caller is expected to put the returned hello into the device
+  /// list — this does not, because the transport has no device list.
+  Future<DialResult> connectToAddress(
+    InternetAddress address, {
+    int? port,
+    Duration? timeout,
+  }) async {
+    if (_stopping) {
+      return const DialResult.failed(DialProblem.unreachable);
+    }
+    final int targetPort = port ?? kDiscoveryPort;
+
+    final ControlConnection connection;
+    try {
+      connection = await ControlConnection.connect(
+        address: address,
+        port: targetPort,
+        selfHello: selfHello,
+        tuning: tuning,
+        onLog: onLog,
+        clock: _clock,
+      );
+    } on Object catch (error) {
+      // The ordinary case, and not worth a stack trace: nothing is listening on
+      // that address, or the router dropped it. Unlike an announce-driven dial
+      // there is no retry to fall back on — the user typed the address, so the
+      // user is the one who hears about it.
+      _log('could not reach $address:$targetPort: $error');
+      return const DialResult.failed(DialProblem.unreachable);
+    }
+
+    // Adopted before the handshake completes, not after. A peer that greets us
+    // with its `hello` and a message in the same read would otherwise have the
+    // message arrive with nobody reading the frames, and `_frames` is
+    // single-subscription — a frame with no listener is dropped, not buffered.
+    _adopt(connection);
+
+    final HelloPayload? hello =
+        await _helloWithin(connection, timeout ?? tuning.handshakeTimeout);
+    if (hello == null) {
+      await connection.close();
+      return const DialResult.failed(DialProblem.unreachable);
+    }
+
+    // Named for the user rather than re-decided: `_onReady` already closed the
+    // socket over this, one microtask ago.
+    if (hello.deviceId == selfHello.deviceId) {
+      await connection.close();
+      return const DialResult.failed(DialProblem.thisDevice);
+    }
+
+    // One check covers the rest. `_adopt` subscribed before `_helloWithin` did,
+    // so `_onReady` has already run by now — it registers the peer for every
+    // connection that survives, and applies §4.4's tie-break against one that
+    // already exists. So "the manager's connection for this id is this
+    // connection" asks exactly "did this dial produce the peer's live socket".
+    //
+    // A role other than `control` needs no case of its own: `_onReady` closes
+    // such a connection, so it lands in the failure below with the same advice,
+    // which is the same advice either way.
+    final _Peer? peer = _peers[hello.deviceId];
+    if (identical(peer?.connection, connection)) {
+      return DialResult.connected(hello);
+    }
+
+    // Losing the tie-break is not a failure to report. The user asked to reach a
+    // device, and the device is reached — over the other socket, which is the one
+    // §4.4 says both ends should keep. Only an unreachable peer is a failure.
+    if (peer?.connection?.isReady ?? false) {
+      // No close here: the tie-break in `_onReady` is what discarded this socket,
+      // and it has already done so.
+      _log('$address:$targetPort answered; keeping the connection already up');
+      return DialResult.connected(hello);
+    }
+
+    // It greeted us and then went away, or the manager was stopped mid-dial.
+    _log('$address:$targetPort answered but the connection is not usable');
+    await connection.close();
+    return const DialResult.failed(DialProblem.unreachable);
+  }
+
+  /// Waits for [connection] to finish its handshake, or gives up and returns
+  /// null.
+  ///
+  /// `stateChanges` is broadcast, so a `ready` that already happened would never
+  /// be seen — and that is the common case here, since a peer on the same LAN
+  /// usually answers before this runs. The [ControlConnection.isReady] check
+  /// closes that window, and is safe without a subscription because nothing can
+  /// run between the check and the `listen`: there is no `await` in between.
+  Future<HelloPayload?> _helloWithin(
+    ControlConnection connection,
+    Duration timeout,
+  ) {
+    if (connection.isReady) {
+      return Future<HelloPayload?>.value(connection.peerHello);
+    }
+
+    final Completer<HelloPayload?> done = Completer<HelloPayload?>();
+    late final StreamSubscription<ConnectionState> states;
+    late final StreamSubscription<ConnectionClosedReason> closed;
+    Timer? timer;
+
+    void finish(HelloPayload? hello) {
+      if (done.isCompleted) {
+        return;
+      }
+      timer?.cancel();
+      unawaited(states.cancel());
+      unawaited(closed.cancel());
+      done.complete(hello);
+    }
+
+    states = connection.stateChanges.listen((ConnectionState state) {
+      if (state == ConnectionState.ready) {
+        finish(connection.peerHello);
+      }
+    });
+    // A connection that ends without ever becoming ready has to finish this too,
+    // or a refusal would sit here for the whole timeout on a socket already gone.
+    closed = connection.closed
+        .listen((ConnectionClosedReason _) => finish(null));
+    timer = Timer(timeout, () => finish(null));
+
+    return done.future;
   }
 
   /// Stops keeping a connection to [peerId] alive and closes the current one.

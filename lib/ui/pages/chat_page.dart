@@ -9,6 +9,7 @@ import '../../core/models/peer.dart';
 import '../../l10n/app_localizations.dart';
 import '../../state/chat_provider.dart';
 import '../../state/lan_provider.dart';
+import '../../state/lan_service.dart';
 import '../../state/providers.dart';
 import '../theme/device_icons.dart';
 import '../widgets/message_bubble.dart';
@@ -202,6 +203,68 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       );
   }
 
+  /// Takes a hand-added device off the list.
+  ///
+  /// Confirmed, and the confirmation says what will *not* happen as well as what
+  /// will: the device disappears from the list, the conversation stays. The
+  /// alternative — a peer that can only be deleted by reinstalling — is what
+  /// this exists to avoid, but a user who has just watched a conversation
+  /// vanish would be right to be annoyed.
+  ///
+  /// The page is left open on purpose. Clearing the selection would look like
+  /// the removal had taken the conversation with it, which is the one thing the
+  /// dialog promises it has not.
+  Future<void> _confirmRemoveDevice(Peer peer) async {
+    final AppLocalizations l10n = AppLocalizations.of(context);
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(l10n.removeDevice),
+        content: Text(l10n.removeDeviceConfirm(peer.name)),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(l10n.actionCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(
+              l10n.removeDevice,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    final LanService? lan = ref.read(lanServiceProvider).valueOrNull;
+    if (lan == null) {
+      // Only reachable when the network service failed to start, in which case
+      // this peer cannot have been added through it either. Forgetting is a
+      // list operation first and a connection operation second, and the list is
+      // owned by a different provider that is still very much alive.
+      ref.read(discoveryServiceProvider).forget(peer.id);
+    } else {
+      await lan.forgetPeer(peer.id);
+    }
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(l10n.deviceRemoved(peer.name)),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+  }
+
   /// Everything the app knows about the other device — §6.2's "same name, two
   /// devices" problem, and the first thing worth having when discovery or a
   /// connection misbehaves.
@@ -294,6 +357,14 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final bool reachable =
         peer.isOnline || ref.watch(peerOnlineProvider(peer.id));
 
+    // Offered only for a peer the user entered by hand. Those are the ones the
+    // ageing rules cannot remove, so without this there would be no way to get
+    // rid of a mistyped address short of restarting the app. An announced peer
+    // leaves on its own when it stops announcing, and a menu item that looks
+    // like it deletes a device but only hides it until the next announce would
+    // be a worse lie than no item at all.
+    final bool isManual = ref.watch(manualPeerIdsProvider).contains(peer.id);
+
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
@@ -304,6 +375,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             onSelected: (String value) => switch (value) {
               'info' => unawaited(_showPeerInfo(peer)),
               'clear' => unawaited(_confirmClearHistory(peer)),
+              'remove' => unawaited(_confirmRemoveDevice(peer)),
               _ => _showNotImplemented(context),
             },
             itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
@@ -315,6 +387,19 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                 value: 'clear',
                 child: Text(l10n.clearHistory),
               ),
+              if (isManual) ...<PopupMenuEntry<String>>[
+                // Set apart because it is the only item here that acts on the
+                // device rather than on the conversation, and the one item of
+                // the three that cannot be undone by sending another message.
+                const PopupMenuDivider(),
+                PopupMenuItem<String>(
+                  value: 'remove',
+                  child: Text(
+                    l10n.removeDevice,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(width: 4),

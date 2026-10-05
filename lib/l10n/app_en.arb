@@ -41,6 +41,41 @@
   "actionCancel": "Cancel",
   "actionAdd": "Add",
 
+  "addDeviceConnecting": "Connecting to {target}...",
+  "@addDeviceConnecting": {
+    "placeholders": {
+      "target": { "type": "String" }
+    }
+  },
+  "addDeviceAdded": "Added {name}",
+  "@addDeviceAdded": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "addDeviceUnreachable": "Could not reach a device at {target}. Check that Feijian is running on it and that its address has not changed.",
+  "@addDeviceUnreachable": {
+    "placeholders": {
+      "target": { "type": "String" }
+    }
+  },
+  "addDeviceSelf": "That address is this device.",
+  "addDeviceOffline": "Cannot add a device: the network service is not running.",
+
+  "removeDevice": "Remove device",
+  "removeDeviceConfirm": "Remove {name} from the device list? The conversation stays on this device.",
+  "@removeDeviceConfirm": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "deviceRemoved": "Removed {name}",
+  "@deviceRemoved": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+
   "chatEmptyWithPeer": "No messages yet. Say hello to {name}.",
   "@chatEmptyWithPeer": {
     "placeholders": {

@@ -231,6 +231,54 @@ abstract class AppLocalizations {
   /// **'Add'**
   String get actionAdd;
 
+  /// No description provided for @addDeviceConnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting to {target}...'**
+  String addDeviceConnecting(String target);
+
+  /// No description provided for @addDeviceAdded.
+  ///
+  /// In en, this message translates to:
+  /// **'Added {name}'**
+  String addDeviceAdded(String name);
+
+  /// No description provided for @addDeviceUnreachable.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not reach a device at {target}. Check that Feijian is running on it and that its address has not changed.'**
+  String addDeviceUnreachable(String target);
+
+  /// No description provided for @addDeviceSelf.
+  ///
+  /// In en, this message translates to:
+  /// **'That address is this device.'**
+  String get addDeviceSelf;
+
+  /// No description provided for @addDeviceOffline.
+  ///
+  /// In en, this message translates to:
+  /// **'Cannot add a device: the network service is not running.'**
+  String get addDeviceOffline;
+
+  /// No description provided for @removeDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove device'**
+  String get removeDevice;
+
+  /// No description provided for @removeDeviceConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove {name} from the device list? The conversation stays on this device.'**
+  String removeDeviceConfirm(String name);
+
+  /// No description provided for @deviceRemoved.
+  ///
+  /// In en, this message translates to:
+  /// **'Removed {name}'**
+  String deviceRemoved(String name);
+
   /// No description provided for @chatEmptyWithPeer.
   ///
   /// In en, this message translates to:

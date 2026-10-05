@@ -20,6 +20,17 @@ class PeerTable {
 
   final Map<String, Peer> _byId = <String, Peer>{};
 
+  /// Peers the user entered by hand rather than heard on the network.
+  ///
+  /// This exists because the ageing rules have nothing to work from on a peer
+  /// that never announces. AP isolation — the very situation manual entry is
+  /// for (design.md §4.1) — drops multicast entirely, so no announce ever
+  /// arrives, `lastSeen` never advances, and [applyTimeouts] would delete the
+  /// entry a minute after the user typed it in. Membership here exempts a peer
+  /// from ageing until the user removes it or it starts announcing for real, at
+  /// which point [touch] drops it from this set and the ordinary rules resume.
+  final Set<String> _manual = <String>{};
+
   /// Peers, ordered for display: online first, then by name.
   ///
   /// The ordering is part of the contract, not an implementation detail — an
@@ -75,6 +86,13 @@ class PeerTable {
 
     _byId[packet.id] = merged;
 
+    // A real announce supersedes a hand-typed entry: the device is reachable the
+    // ordinary way after all, so it stops being the user's problem to remove and
+    // starts being aged like every other peer. This is the exit from manual
+    // mode that needs no UI, and it is why a manual peer costs nothing once the
+    // network starts behaving.
+    _manual.remove(packet.id);
+
     return existing == null || !_sameVisibleState(existing, merged);
   }
 
@@ -93,6 +111,12 @@ class PeerTable {
     final Map<String, Peer> wentOffline = <String, Peer>{};
 
     for (final MapEntry<String, Peer> entry in _byId.entries) {
+      if (_manual.contains(entry.key)) {
+        // Not aged: a hand-entered peer has no announces to be measured
+        // against, and "we have heard nothing from it" is the normal state of a
+        // device behind AP isolation rather than a reason to drop it.
+        continue;
+      }
       final DateTime? seen = entry.value.lastSeen;
       if (seen == null) {
         continue;
@@ -128,9 +152,86 @@ class PeerTable {
   }
 
   /// Drops a peer immediately, for an explicit `bye`.
-  bool remove(String id) => _byId.remove(id) != null;
+  ///
+  /// A manual peer is exempt. `bye` arrives over a control connection, and a
+  /// device we reached by typing its address is exactly the one whose `bye` we
+  /// may receive while still wanting it listed — the connection dropped, not the
+  /// device. Only the user removes a manual entry; see [forget].
+  bool remove(String id) {
+    if (_manual.contains(id)) {
+      return false;
+    }
+    return _byId.remove(id) != null;
+  }
 
-  void clear() => _byId.clear();
+  /// True when [id] was entered by hand and has not announced since.
+  bool isManual(String id) => _manual.contains(id);
+
+  /// The manual peer ids, as a copy — the caller must not be able to mutate the
+  /// table's own set.
+  Set<String> get manualIds => Set<String>.unmodifiable(_manual);
+
+  /// Records a peer the user entered by hand. Returns true when the displayed
+  /// list changed.
+  ///
+  /// A peer that is already known from an announce is left alone: the announce
+  /// carries a name, an icon and an OS string that a typed address does not, and
+  /// the device is reachable the ordinary way already, so there is nothing for
+  /// manual mode to add.
+  ///
+  /// The entry starts offline in the caller's hands — [setOnline] is what the
+  /// connection state moves — but the caller decides, because it is the one that
+  /// knows whether the address answered before it got here.
+  bool addManual(Peer peer) {
+    if (peer.id == selfId) {
+      return false;
+    }
+    final Peer? existing = _byId[peer.id];
+    if (existing != null && !_manual.contains(peer.id)) {
+      return false;
+    }
+    _manual.add(peer.id);
+    // Trust is decided locally and survives every other kind of update, so it
+    // survives this one too.
+    final Peer merged =
+        existing == null ? peer : peer.copyWith(isTrusted: existing.isTrusted);
+    _byId[peer.id] = merged;
+    return existing == null || !_sameVisibleState(existing, merged);
+  }
+
+  /// Sets whether a manual peer is reachable. Returns true when the displayed
+  /// list changed.
+  ///
+  /// Only manual peers: for an announced one the network is a better authority
+  /// on whether a device is up, and the two would fight — an announce arriving
+  /// mid-reconnect would flip the entry back and forth.
+  bool setOnline(String id, {required bool isOnline}) {
+    if (!_manual.contains(id)) {
+      return false;
+    }
+    final Peer? peer = _byId[id];
+    if (peer == null || peer.isOnline == isOnline) {
+      return false;
+    }
+    _byId[id] = peer.copyWith(isOnline: isOnline);
+    return true;
+  }
+
+  /// Drops a peer the user removed by hand — manual or not. Returns true when
+  /// the displayed list changed.
+  ///
+  /// This is the only way out of manual mode that the user controls, and the
+  /// counterpart to [remove]'s exemption: the ageing rules cannot take a manual
+  /// peer away, so something has to.
+  bool forget(String id) {
+    _manual.remove(id);
+    return _byId.remove(id) != null;
+  }
+
+  void clear() {
+    _byId.clear();
+    _manual.clear();
+  }
 
   /// Compares only the fields the device list renders.
   ///

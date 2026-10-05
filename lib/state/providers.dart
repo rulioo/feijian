@@ -130,6 +130,22 @@ final Provider<int> onlinePeerCountProvider = Provider<int>((Ref ref) {
   return ref.watch(peersProvider).where((Peer p) => p.isOnline).length;
 });
 
+/// Peer ids the user entered by hand, and which no announce has confirmed since.
+///
+/// These are the ones the ageing rules cannot remove, so they are also the ones
+/// that need a "Remove device" action — without it there would be no way to get
+/// rid of a mistyped address except restarting the app.
+///
+/// The peer list is watched first so this recomputes when one is added or
+/// forgotten. Reading the table alone would never trigger a rebuild: the table
+/// is mutable state behind a getter, not a value the provider can compare.
+final Provider<Set<String>> manualPeerIdsProvider = Provider<Set<String>>((
+  Ref ref,
+) {
+  ref.watch(discoveredPeersProvider);
+  return ref.watch(discoveryServiceProvider).table.manualIds;
+});
+
 /// The conversation currently open. Null on a phone until a device is tapped,
 /// and null on desktop until the user picks one from the left pane.
 final StateProvider<Peer?> selectedPeerProvider = StateProvider<Peer?>(

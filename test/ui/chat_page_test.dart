@@ -46,12 +46,14 @@ void main() {
   late AppDatabase db;
   late ChatRepository chat;
   late PeerRepository peers;
+  late _NoPeers discovery;
   late LanService service;
 
   setUp(() {
     db = AppDatabase.memory();
     chat = ChatRepository(db);
     peers = PeerRepository(db);
+    discovery = _NoPeers();
     // Constructed but never started: no listener, no port, no sockets — and
     // still the same object the app sends through, so `sendText` writes a real
     // row and finds that there is nowhere to put it on the wire.
@@ -68,7 +70,7 @@ void main() {
           version: 1,
         ),
       ),
-      discovery: _NoPeers(),
+      discovery: discovery,
       chat: chat,
       peers: peers,
     );
@@ -79,7 +81,10 @@ void main() {
     await db.close();
   });
 
-  Future<void> pumpChat(WidgetTester tester) async {
+  /// [manual] puts the peer in the set the "Remove device" action is keyed on —
+  /// the stand-in for what `PeerTable._manual` would say about a device the user
+  /// typed in by hand.
+  Future<void> pumpChat(WidgetTester tester, {bool manual = false}) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: <Override>[
@@ -89,6 +94,8 @@ void main() {
             (Ref ref) => Stream<List<Peer>>.value(const <Peer>[bob]),
           ),
           lanServiceProvider.overrideWith((Ref ref) => service),
+          if (manual)
+            manualPeerIdsProvider.overrideWithValue(const <String>{'peer-bob'}),
         ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -452,6 +459,48 @@ void main() {
     expect(find.text('Android'), findsOneWidget);
     expect(find.text('Android 14'), findsOneWidget);
   });
+
+  testWidgets('a hand-added device can be removed, and asks first', (
+    WidgetTester tester,
+  ) async {
+    await pumpChat(tester, manual: true);
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove device'), findsOneWidget);
+
+    await tester.tap(find.text('Remove device'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('The conversation stays on this device'),
+      findsOneWidget,
+      reason: 'removing a device is not deleting a conversation, and saying so '
+          'is what keeps the two from looking like the same action',
+    );
+
+    // The dialog's title and its confirm button carry the same words, so the
+    // button is picked out by type rather than by text.
+    await tester.tap(find.widgetWithText(TextButton, 'Remove device'));
+    await tester.pumpAndSettle();
+
+    expect(discovery.forgotten, <String>['peer-bob']);
+    expect(find.text('Removed Bob-PC'), findsOneWidget);
+  });
+
+  testWidgets('an announced device is not offered removal', (
+    WidgetTester tester,
+  ) async {
+    // Its presence on the list is the network's decision, not the user's, so
+    // there is nothing for this action to do: remove it and the next announce
+    // puts it straight back.
+    await pumpChat(tester);
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Device info'), findsOneWidget);
+    expect(find.text('Remove device'), findsNothing);
+  });
 }
 
 /// The real service with its one network side effect removed.
@@ -480,4 +529,27 @@ class _NoPeers implements PeerSource {
 
   @override
   List<Peer> get peers => const <Peer>[];
+
+  // The peer menu reads `manualIds` to decide whether to offer "Remove device".
+  // Always empty here: these tests drive a conversation with an announced peer,
+  // and the manual path has its own tests.
+
+  @override
+  bool addManual(Peer peer) => false;
+
+  @override
+  bool isManual(String id) => false;
+
+  @override
+  bool setOnline(String id, {required bool isOnline}) => false;
+
+  /// Peers `forgetPeer` actually reached, so the menu action can be asserted on
+  /// the side effect rather than on the snackbar that follows it.
+  final List<String> forgotten = <String>[];
+
+  @override
+  bool forget(String id) {
+    forgotten.add(id);
+    return true;
+  }
 }

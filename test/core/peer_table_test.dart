@@ -32,6 +32,27 @@ bool _touch(PeerTable table, AnnouncePacket packet, {String ip = '192.168.1.101'
   return table.touch(packet: packet, fromIp: ip, now: now ?? _t0);
 }
 
+/// A peer built the way Add-by-IP builds one: from a `hello`, with no
+/// `lastSeen` — there is no announce to take one from, and inventing one would
+/// put the entry back under the ageing rules that manual mode exists to escape.
+Peer _manual({
+  String id = 'manual-1',
+  String name = 'Study-PC',
+  String ip = '192.168.1.150',
+  int port = 24250,
+  bool online = false,
+}) {
+  return Peer(
+    id: id,
+    name: name,
+    deviceType: DeviceType.windows,
+    icon: DeviceIcon.desktop,
+    lastIp: ip,
+    lastPort: port,
+    isOnline: online,
+  );
+}
+
 void main() {
   group('touch', () {
     test('adds a new peer as online', () {
@@ -177,6 +198,152 @@ void main() {
       final DateTime later = _t0.add(kPeerOfflineAfter + const Duration(seconds: 6));
       expect(_touch(table, _announce(), now: later), isTrue);
       expect(table['peer-1']!.isOnline, isTrue);
+    });
+  });
+
+  group('manual peers (Add by IP)', () {
+    test('adds a peer that no announce will confirm', () {
+      final PeerTable table = PeerTable();
+
+      expect(table.addManual(_manual()), isTrue);
+      expect(table['manual-1']!.name, 'Study-PC');
+      expect(table['manual-1']!.lastIp, '192.168.1.150');
+      expect(table.isManual('manual-1'), isTrue);
+      expect(table.manualIds, <String>{'manual-1'});
+      expect(table.length, 1);
+    });
+
+    test('reports no change when the same entry is added again', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+
+      expect(table.addManual(_manual()), isFalse);
+      expect(table.length, 1);
+    });
+
+    test('refuses this device\'s own id', () {
+      final PeerTable table = PeerTable(selfId: 'manual-1');
+
+      expect(table.addManual(_manual()), isFalse);
+      expect(table.isEmpty, isTrue);
+    });
+
+    test('leaves a peer that announces for real alone', () {
+      final PeerTable table = PeerTable();
+      _touch(table, _announce(id: 'manual-1'));
+
+      // A name and an icon off the network beat anything typed into a box, and
+      // the device is reachable the ordinary way already — there is nothing for
+      // manual mode to add, so the address is not even recorded.
+      expect(table.addManual(_manual(name: 'Typed-In')), isFalse);
+      expect(table['manual-1']!.name, 'Bob-PC');
+      expect(table.isManual('manual-1'), isFalse);
+    });
+
+    test('survives the ageing that removes an announced peer', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual(online: true));
+
+      // The whole reason manual mode exists: behind AP isolation no announce
+      // ever arrives, so there is no `lastSeen` to measure and the ordinary
+      // rules would delete the user's entry a minute after they made it.
+      final DateTime muchLater =
+          _t0.add(kPeerRemoveAfter + const Duration(hours: 1));
+      expect(table.applyTimeouts(muchLater), isFalse);
+      expect(table.length, 1);
+      expect(table['manual-1']!.isOnline, isTrue);
+    });
+
+    test('takes its online state from the connection, not from a clock', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+
+      expect(table['manual-1']!.isOnline, isFalse, reason: 'as entered');
+      expect(table.setOnline('manual-1', isOnline: true), isTrue);
+      expect(table['manual-1']!.isOnline, isTrue);
+      expect(table.setOnline('manual-1', isOnline: true), isFalse);
+      expect(table.setOnline('manual-1', isOnline: false), isTrue);
+      expect(table['manual-1']!.isOnline, isFalse);
+    });
+
+    test('setOnline is inert for an announced peer', () {
+      final PeerTable table = PeerTable();
+      _touch(table, _announce());
+
+      // The network decides for those, and a second authority would flip the
+      // entry back and forth every time an announce landed mid-reconnect.
+      expect(table.setOnline('peer-1', isOnline: false), isFalse);
+      expect(table['peer-1']!.isOnline, isTrue);
+      expect(table.setOnline('nobody', isOnline: true), isFalse);
+    });
+
+    test('is not removed by a bye', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+
+      // `bye` arrives over a control connection. A device reached by typing its
+      // address is exactly the one whose connection drops while the device is
+      // still wanted, so the goodbye must not take the entry with it.
+      expect(table.remove('manual-1'), isFalse);
+      expect(table.isManual('manual-1'), isTrue);
+      expect(table.length, 1);
+    });
+
+    test('stops being manual once it announces', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+
+      expect(
+        _touch(table, _announce(id: 'manual-1', name: 'Study-PC')),
+        isTrue,
+        reason: 'the announce brings an address the entry did not have',
+      );
+      expect(table.isManual('manual-1'), isFalse);
+
+      // And from here the ordinary rules apply again — the exit from manual
+      // mode that needs no UI.
+      table.applyTimeouts(_t0.add(kPeerRemoveAfter + const Duration(seconds: 1)));
+      expect(table.isEmpty, isTrue);
+    });
+
+    test('forget removes a manual peer, and an announced one too', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual(id: 'typed'));
+      _touch(table, _announce(id: 'heard'));
+
+      // The user-facing "Remove device" acts on either: the ageing rules will
+      // not take a manual peer away, and a user who wants a device gone should
+      // not have to wait out a minute of silence for an announced one.
+      expect(table.forget('typed'), isTrue);
+      expect(table.forget('heard'), isTrue);
+      expect(table.forget('nobody'), isFalse);
+      expect(table.isEmpty, isTrue);
+      expect(table.manualIds, isEmpty);
+    });
+
+    test('manualIds is a snapshot, and cannot be used to mutate the table', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+      final Set<String> ids = table.manualIds;
+
+      // Unmodifiable rather than merely copied, so reaching for the obvious
+      // thing — clearing it to un-manual everything — fails loudly instead of
+      // quietly doing nothing to the table the caller was trying to change.
+      expect(() => ids.clear(), throwsUnsupportedError);
+
+      table.addManual(_manual(id: 'typed-2'));
+      expect(ids, <String>{'manual-1'}, reason: 'a snapshot, not a live view');
+      expect(table.manualIds, <String>{'manual-1', 'typed-2'});
+    });
+
+    test('clear drops the manual entries with the rest', () {
+      final PeerTable table = PeerTable();
+      table.addManual(_manual());
+      table.clear();
+
+      expect(table.isEmpty, isTrue);
+      expect(table.manualIds, isEmpty);
+      expect(table.applyTimeouts(_t0), isFalse);
     });
   });
 
