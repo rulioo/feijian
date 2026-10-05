@@ -7,6 +7,7 @@ import 'ui/pages/chat_page.dart';
 import 'ui/pages/devices_page.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/ui_constants.dart';
+import 'ui/widgets/discovery_lifecycle.dart';
 
 class FeijianApp extends ConsumerWidget {
   const FeijianApp({super.key});
@@ -15,21 +16,25 @@ class FeijianApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final AppSettings settings = ref.watch(settingsProvider);
 
-    return MaterialApp(
-      onGenerateTitle: (BuildContext context) =>
-          AppLocalizations.of(context).appName,
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
-      themeMode: ThemeMode.system,
-      // Plumbing for the language override in settings — null follows the
-      // system locale (design.md §8.2).
-      locale: settings.languageCode == null
-          ? null
-          : Locale(settings.languageCode!),
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: const HomeShell(),
+    // Wrapped around the whole app rather than the devices page: being away is
+    // a property of the process, not of whichever page happens to be on top.
+    return DiscoveryLifecycle(
+      child: MaterialApp(
+        onGenerateTitle: (BuildContext context) =>
+            AppLocalizations.of(context).appName,
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        themeMode: ThemeMode.system,
+        // Plumbing for the language override in settings — null follows the
+        // system locale (design.md §8.2).
+        locale: settings.languageCode == null
+            ? null
+            : Locale(settings.languageCode!),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: const HomeShell(),
+      ),
     );
   }
 }
