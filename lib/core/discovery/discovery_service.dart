@@ -11,9 +11,11 @@ import 'peer_table.dart';
 
 /// Binds one datagram socket.
 ///
-/// A seam, and the only one in this class: [DiscoveryService] throws away a
+/// The only *socket* seam in this class: [DiscoveryService] throws away a
 /// socket that has stopped writing and binds another, and no test can make a
-/// real socket latch the way the OS makes one latch.
+/// real socket latch the way the OS makes one latch. (The timing fields on the
+/// constructor are seams of the other kind — they exist so a test can watch the
+/// heartbeat without waiting out a real five-second interval.)
 typedef DatagramBinder = Future<RawDatagramSocket> Function(
   InternetAddress address,
   int port,
@@ -41,10 +43,29 @@ class DiscoveryService implements PeerSource {
     String multicastGroup = kMulticastGroup,
     this.onLog,
     DatagramBinder? bind,
+    this.announceInterval = kAnnounceInterval,
+    this.probeEveryRounds = kProbeEveryRounds,
+    this.startBurstRounds = kStartBurstRounds,
+    this.startBurstGap = kStartBurstGap,
   }) : _discoveryPort = discoveryPort,
        _bind = bind ?? _bindSocket,
        _multicast = _parseOrFallback(multicastGroup, kMulticastGroup),
        _broadcast = InternetAddress(kBroadcastAddress);
+
+  /// How often the heartbeat tells the network this device is here.
+  ///
+  /// Injectable only so tests do not have to wait out the real interval; the
+  /// cadence itself is [kAnnounceInterval]'s.
+  final Duration announceInterval;
+
+  /// Heartbeat rounds between the probes — see [_onAnnounceTick].
+  final int probeEveryRounds;
+
+  /// Rounds of probe-and-announce sent when discovery first comes up, and the
+  /// gap between them — see [_sendStartBurst]. The same shape as the rounds a
+  /// manual refresh sends, for the same reason.
+  final int startBurstRounds;
+  final Duration startBurstGap;
 
   static Future<RawDatagramSocket> _bindSocket(
     InternetAddress address,
@@ -126,6 +147,12 @@ class DiscoveryService implements PeerSource {
   final List<RawDatagramSocket> _senders = <RawDatagramSocket>[];
   Timer? _announceTimer;
   Timer? _timeoutTimer;
+
+  /// The pending round of the opening burst, if one is still to come.
+  Timer? _startBurstTimer;
+
+  /// Heartbeat rounds since the last start, for [_onAnnounceTick].
+  int _announceRound = 0;
 
   /// Consecutive refused writes per socket, and the sockets the first refusal
   /// has already been reported for.
@@ -248,16 +275,73 @@ class DiscoveryService implements PeerSource {
     _send(AnnounceType.probe);
     _send(AnnounceType.announce);
 
-    _announceTimer = Timer.periodic(
-      kAnnounceInterval,
-      (_) => _send(AnnounceType.announce),
-    );
+    // Then the same round again a couple of times, because a device that has
+    // just joined the network gets exactly one moment to introduce itself and
+    // it is the moment its owner is watching. The first round above stays
+    // synchronous, so "it is on the wire before start() returns" still holds.
+    _sendStartBurst();
+
+    _announceRound = 0;
+    _announceTimer = Timer.periodic(announceInterval, (_) => _onAnnounceTick());
     // 1s granularity: fine enough that the 15s/60s thresholds land where the
     // design says they do, cheap enough not to think about.
     _timeoutTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => _applyTimeouts(),
     );
+  }
+
+  /// What the heartbeat does once every [announceInterval].
+  ///
+  /// Mostly it announces. Every [probeEveryRounds] it also asks.
+  ///
+  /// The asking is the part that matters on a broken network. An announce goes
+  /// out over multicast and broadcast, and if either of those has stopped
+  /// arriving at a peer — a multicast membership the kernel dropped when an
+  /// interface bounced, a broadcast the access point will not forward — this
+  /// device is invisible to that peer no matter how often it announces. The
+  /// peer *can* still reach us by unicast, which is exactly what happens when
+  /// someone presses Rescan: the refresh sends a probe, and every peer that
+  /// hears it answers by unicast. Sending one on the heartbeat means the list
+  /// repairs itself instead of waiting for a human to notice.
+  void _onAnnounceTick() {
+    _announceRound++;
+    if (_announceRound % probeEveryRounds == 0) {
+      _send(AnnounceType.probe);
+    }
+    _send(AnnounceType.announce);
+  }
+
+  /// Repeats the opening probe-and-announce [startBurstRounds] times in total,
+  /// [startBurstGap] apart. Round one has already been sent by the caller.
+  ///
+  /// A [stop] that lands mid-burst ends it, because [stop] cancels the pending
+  /// timer below. There was also an `if (!_started) return` here, guarding
+  /// against a round going out from a service that had already said goodbye;
+  /// it was removed as unreachable and unobservable. Unreachable because [stop]
+  /// cancels this timer synchronously, before its first `await`, and a cancelled
+  /// Dart timer never runs — and unobservable even with both removed, because
+  /// [stop] also closes every socket, so a late round has nothing to write on.
+  /// The test that covers stopping mid-burst therefore passes for either
+  /// reason; keeping a guard that no test can fail is what it looks like to
+  /// have a guard that does nothing.
+  void _sendStartBurst() {
+    if (startBurstRounds <= 1) {
+      return;
+    }
+    int sent = 1;
+    void schedule() {
+      _startBurstTimer = Timer(startBurstGap, () {
+        _send(AnnounceType.probe);
+        _send(AnnounceType.announce);
+        sent++;
+        if (sent < startBurstRounds) {
+          schedule();
+        }
+      });
+    }
+
+    schedule();
   }
 
   /// Discovers again, now — the Rescan button and the refresh action of §6.2.
@@ -483,6 +567,11 @@ class DiscoveryService implements PeerSource {
     _announceTimer = null;
     _timeoutTimer?.cancel();
     _timeoutTimer = null;
+    // Ends an opening burst that is still in flight. Correct ownership rather
+    // than a load-bearing guard — see [_sendStartBurst] for why it is not, and
+    // cannot be, the thing that keeps a stopped service off the network.
+    _startBurstTimer?.cancel();
+    _startBurstTimer = null;
 
     // Must precede the closes, and is best effort — on a machine that is
     // shutting down there may be no network left to send it on.

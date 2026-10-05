@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:feijian/core/constants.dart';
 import 'package:feijian/core/discovery/announce.dart';
 import 'package:feijian/core/discovery/discovery_service.dart';
 import 'package:feijian/core/models/peer.dart';
@@ -108,6 +109,106 @@ class _FakePeer {
       'in 5 attempts: ${sendLog.join(' ; ')}',
     );
   }
+
+  void close() => socket.close();
+}
+
+/// Watches what the service puts *on the wire*, decoded.
+///
+/// Every datagram is written twice, multicast and broadcast. The per-interface
+/// senders switch multicast loopback off, so this socket only ever sees the
+/// broadcast copy of each — which is enough, because the bytes are identical
+/// and this decodes them back into packets rather than counting them, so a test
+/// can ask *which kind* of message went out and not just how many.
+///
+/// **It has to join the multicast group, and skipping that is not a small
+/// omission.** On Windows a send to a group with no local member draws an ICMP
+/// port-unreachable, which latches the sending socket: every later write on it
+/// returns 0 rather than throwing. Measured on this machine, an observer that
+/// did not join saw the *first* probe and the *first* announce and then nothing
+/// at all — the multicast write latched the sender, taking the broadcast copies
+/// down with it, and the burst under test looked broken when it was working
+/// exactly as designed. So this mirrors what a real peer does, and is also the
+/// only way the test can see anything.
+class _Wire {
+  _Wire(this.socket) {
+    socket.listen((RawSocketEvent event) {
+      if (event != RawSocketEvent.read) {
+        return;
+      }
+      Datagram? datagram;
+      while ((datagram = socket.receive()) != null) {
+        final AnnouncePacket? packet = AnnouncePacket.decode(
+          datagram!.data,
+          now: DateTime.now().toUtc(),
+        ).packet;
+        if (packet != null) {
+          final DateTime at = DateTime.now();
+          packets.add(packet);
+          if (packet.type == AnnounceType.probe) {
+            _probesAt.add(at);
+          }
+        }
+      }
+    });
+  }
+
+  static Future<_Wire> bind(int port) async {
+    final RawDatagramSocket socket = await RawDatagramSocket.bind(
+      InternetAddress.anyIPv4,
+      port,
+      reuseAddress: true,
+    );
+    socket.broadcastEnabled = true;
+
+    // On every interface, as the service itself does — a join that fails on one
+    // adapter (a VPN, a virtual switch) must not keep the others from working.
+    final InternetAddress group = InternetAddress(kMulticastGroup);
+    for (final NetworkInterface ni
+        in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
+      try {
+        socket.joinMulticast(group, ni);
+      } on SocketException {
+        // Interface cannot do multicast; the remaining ones still count.
+      }
+    }
+    return _Wire(socket);
+  }
+
+  final RawDatagramSocket socket;
+  final List<AnnouncePacket> packets = <AnnouncePacket>[];
+
+  /// When each probe arrived, so a test can ask whether the opening burst was
+  /// *spread out* rather than merely repeated. See [probeSpan].
+  final List<DateTime> _probesAt = <DateTime>[];
+
+  int get probes =>
+      packets.where((AnnouncePacket p) => p.type == AnnounceType.probe).length;
+
+  /// Receipt time of the last probe minus the first.
+  ///
+  /// The measurement the opening-burst test actually rests on, and deliberately
+  /// not a packet count. Counting cannot separate three rounds from one: this
+  /// machine drops enough of a multicast burst that a healthy threeround burst
+  /// and a single round both land in the low single digits, so a count
+  /// assertion is a coin flip that fails on *correct* code. The span measures
+  /// the property the burst exists for — the packets leaving at different
+  /// moments — and it survives losing any individual datagram, because it needs
+  /// only one survivor from the first round and one from the last.
+  ///
+  /// Measured here: three rounds 50ms apart span 102-108ms across 25 runs, and
+  /// one round spans 0ms every time.
+  Duration get probeSpan => _probesAt.length < 2
+      ? Duration.zero
+      : _probesAt.last.difference(_probesAt.first);
+
+  int get announces => packets
+      .where((AnnouncePacket p) => p.type == AnnounceType.announce)
+      .length;
+
+  /// What went out, for the failure message. A test that says "expected 3, got
+  /// 1" without saying which is almost no help at all.
+  String get summary => packets.map((AnnouncePacket p) => p.type.name).join(',');
 
   void close() => socket.close();
 }
@@ -382,6 +483,133 @@ void main() {
     fresh.rescan();
     await fresh.stop();
     fresh.rescan(); // after stop
+  });
+
+  // --- Being heard by a network that cannot hear an announce -----------------
+  //
+  // What these three cover is a one-way network: the peer is fine, it can reach
+  // us, and it answers — but our multicast or broadcast has stopped arriving at
+  // it, so every announce we send is invisible there. Waiting never repairs it
+  // and pressing Rescan always does, because a refresh opens with a probe and a
+  // **probe is answered by unicast**. That difference is the whole bug: the list
+  // only filled when a human noticed it had not.
+
+  test('the heartbeat asks as well as tells', () async {
+    port = await _servicePort();
+    final _Wire wire = await _Wire.bind(port);
+    addTearDown(wire.close);
+
+    service = DiscoveryService(
+      discoveryPort: port,
+      announceInterval: const Duration(milliseconds: 60),
+      probeEveryRounds: 3,
+      // Out of the way: this test is about the heartbeat, not the opening.
+      startBurstRounds: 1,
+    );
+    service.updateSelf(_self);
+    await service.start();
+    addTearDown(service.dispose);
+
+    await _waitUntil(
+      () => wire.probes >= 3,
+      reason: 'probes to keep going out on the heartbeat',
+      diagnostics: () => '  wire=${wire.summary}',
+    );
+    expect(
+      wire.announces,
+      greaterThanOrEqualTo(3),
+      reason: 'and the plain announces not to stop: a peer that *can* hear '
+          'them still needs them, and they are how this device stays in that '
+          'peer\'s list\n  wire=${wire.summary}',
+    );
+  });
+
+  test('a device coming up introduces itself more than once', () async {
+    port = await _servicePort();
+    final _Wire wire = await _Wire.bind(port);
+    addTearDown(wire.close);
+
+    service = DiscoveryService(
+      discoveryPort: port,
+      // Long enough that nothing in this test can have come from the
+      // heartbeat, so every extra packet is the burst's and nothing else's.
+      announceInterval: const Duration(seconds: 30),
+      startBurstRounds: 3,
+      startBurstGap: const Duration(milliseconds: 50),
+    );
+    service.updateSelf(_self);
+    await service.start();
+    addTearDown(service.dispose);
+
+    await _waitUntil(
+      () => wire.probes >= 1,
+      reason: 'the opening burst to start',
+      diagnostics: () => '  wire=${wire.summary}',
+    );
+    // Fixed rather than polled, because elapsed time *is* what is being
+    // measured here: a poll would stop at the first sighting and the span it
+    // then computed would be zero by construction. The burst is three rounds
+    // 50ms apart, so this is finished long before the wait is.
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(
+      wire.probeSpan,
+      greaterThanOrEqualTo(const Duration(milliseconds: 80)),
+      reason: 'the rounds of the opening burst to be spread over time, which '
+          'is the whole point of them — three datagrams leaving in the same '
+          'instant are three datagrams one Wi-Fi hiccup takes together, and '
+          'that is the failure this burst was added to fix\n'
+          '  wire=${wire.summary}  span=${wire.probeSpan.inMilliseconds}ms',
+    );
+    expect(
+      wire.announces,
+      greaterThanOrEqualTo(2),
+      reason: 'and the rounds to introduce this device, not just to ask: a '
+          'probe alone leaves the peer that hears it to reply, and there is '
+          'no reason to make a working network do that work\n'
+          '  wire=${wire.summary}',
+    );
+  });
+
+  test('a stop during the opening burst ends it', () async {
+    port = await _servicePort();
+    final _Wire wire = await _Wire.bind(port);
+    addTearDown(wire.close);
+
+    service = DiscoveryService(
+      discoveryPort: port,
+      announceInterval: const Duration(seconds: 30),
+      startBurstRounds: 8,
+      startBurstGap: const Duration(milliseconds: 120),
+    );
+    service.updateSelf(_self);
+    await service.start();
+    addTearDown(service.dispose);
+
+    await _waitUntil(
+      () => wire.probes >= 2,
+      reason: 'the burst to be under way',
+      diagnostics: () => '  wire=${wire.summary}',
+    );
+
+    await service.stop();
+    // Counted from the probes alone: the goodbye `stop` sends is a packet of
+    // its own and would otherwise look like the burst carrying on.
+    final int atStop = wire.probes;
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(
+      wire.probes,
+      atStop,
+      reason: 'a device that has said goodbye must not go on introducing '
+          'itself — the bye would be followed by an announce, and every peer '
+          'would take it for this device coming back\n  wire=${wire.summary}',
+    );
+    // What holds that line is `stop` closing the sockets, not the burst timer
+    // being cancelled — measured, by deleting the guard that used to sit in the
+    // burst and then the cancellation as well, and watching this still pass.
+    // So this is a property test, not a test of either line: it fails if the
+    // sockets ever outlive the goodbye, which is the refactor that would matter.
   });
 
   // --- Recovering from a socket that has latched -----------------------------

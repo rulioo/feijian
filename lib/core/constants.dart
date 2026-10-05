@@ -31,6 +31,31 @@ const String kMdnsServiceType = '_feijian._tcp';
 
 const Duration kAnnounceInterval = Duration(seconds: 5);
 
+/// Heartbeat rounds between the periodic probes — six rounds, 30s.
+///
+/// A plain announce is multicast and broadcast, and on a network where either
+/// of those has quietly stopped arriving, this device becomes invisible to
+/// peers that could still reach it perfectly well by unicast. That is what a
+/// manual refresh produces and why pressing it works when waiting does not: a
+/// **probe** is the one packet in this protocol that reliably draws a unicast
+/// answer out of every peer that hears it. Sending one now and then is what
+/// keeps the list honest on a network where the send direction is not the
+/// problem. Unicast is not free of cost, so this is deliberately slow — each
+/// probe costs one packet per peer on the LAN.
+const int kProbeEveryRounds = 6;
+
+/// Rounds of probe-and-announce a device sends on coming up, and the gap
+/// between them.
+///
+/// One datagram is a coin flip: Windows drops roughly 4% of UDP sent back to
+/// back on a real NIC and reports it only as a 0-byte write, and a Wi-Fi access
+/// point may drop a broadcast outright. A device that has just joined the
+/// network gets one moment to introduce itself, and it is the moment its owner
+/// is watching. The same shape, and the same numbers, as the rounds a manual
+/// refresh sends.
+const int kStartBurstRounds = 3;
+const Duration kStartBurstGap = Duration(milliseconds: 400);
+
 /// No packet for this long → grey the peer out but keep the conversation readable.
 const Duration kPeerOfflineAfter = Duration(seconds: 15);
 
