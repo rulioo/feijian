@@ -56,6 +56,30 @@ const int kProbeEveryRounds = 6;
 const int kStartBurstRounds = 3;
 const Duration kStartBurstGap = Duration(milliseconds: 400);
 
+/// How long *every* peer this device has heard from may stay silent before
+/// discovery stops waiting and rebuilds itself — the watchdog.
+///
+/// Four announce intervals, and deliberately just past [kPeerOfflineAfter]: by
+/// the time this fires the list is already visibly grey, so the repair lands
+/// while the user is still looking at the symptom rather than after they have
+/// given up on it.
+///
+/// This is the third and last of the ways a device goes invisible, and the only
+/// one that needs no one else's cooperation to fix. A multicast membership the
+/// kernel dropped, a listening socket that has quietly stopped delivering, an
+/// interface that was reset underneath us — none of those produce an error, and
+/// none of them are repaired by announcing more loudly, because the broken
+/// direction is the one pointing at us. Rebuilding the sockets is what a manual
+/// refresh does, and this is that, without the manual part.
+///
+/// It cannot fire before [kPeerRemoveAfter] has emptied the table of a peer
+/// that really has gone away: inside that window a peer that left is still
+/// listed, so "everyone has gone quiet" is also true of a network where nothing
+/// is wrong. That is what the one-repair-per-silence rule in the service is
+/// for — one rebuild, not one every second, and no second attempt until
+/// something is heard again.
+const Duration kSilentPeerRebindAfter = Duration(seconds: 20);
+
 /// No packet for this long → grey the peer out but keep the conversation readable.
 const Duration kPeerOfflineAfter = Duration(seconds: 15);
 

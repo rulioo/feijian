@@ -47,6 +47,7 @@ class DiscoveryService implements PeerSource {
     this.probeEveryRounds = kProbeEveryRounds,
     this.startBurstRounds = kStartBurstRounds,
     this.startBurstGap = kStartBurstGap,
+    this.silentPeerAfter = kSilentPeerRebindAfter,
   }) : _discoveryPort = discoveryPort,
        _bind = bind ?? _bindSocket,
        _multicast = _parseOrFallback(multicastGroup, kMulticastGroup),
@@ -66,6 +67,10 @@ class DiscoveryService implements PeerSource {
   /// manual refresh sends, for the same reason.
   final int startBurstRounds;
   final Duration startBurstGap;
+
+  /// How long every peer may stay silent before discovery rebuilds itself —
+  /// see [_repairIfEveryPeerHasGoneQuiet].
+  final Duration silentPeerAfter;
 
   static Future<RawDatagramSocket> _bindSocket(
     InternetAddress address,
@@ -153,6 +158,12 @@ class DiscoveryService implements PeerSource {
 
   /// Heartbeat rounds since the last start, for [_onAnnounceTick].
   int _announceRound = 0;
+
+  /// True once the watchdog has rebuilt discovery for the silence currently in
+  /// progress. Cleared the moment anything is heard again, so the next silence
+  /// is repairable too — but a silence that outlasts the repair does not turn
+  /// into a rebuild every second. See [_repairIfEveryPeerHasGoneQuiet].
+  bool _silenceRepaired = false;
 
   /// Consecutive refused writes per socket, and the sockets the first refusal
   /// has already been reported for.
@@ -282,9 +293,11 @@ class DiscoveryService implements PeerSource {
     _sendStartBurst();
 
     _announceRound = 0;
+    _silenceRepaired = false;
     _announceTimer = Timer.periodic(announceInterval, (_) => _onAnnounceTick());
     // 1s granularity: fine enough that the 15s/60s thresholds land where the
-    // design says they do, cheap enough not to think about.
+    // design says they do, cheap enough not to think about. The watchdog shares
+    // it — see [_repairIfEveryPeerHasGoneQuiet].
     _timeoutTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => _applyTimeouts(),
@@ -869,6 +882,18 @@ class DiscoveryService implements PeerSource {
       return;
     }
 
+    // Someone else's packet arrived, so whatever silence was in progress is
+    // over and a later one deserves its own repair. Deliberately here rather
+    // than where the table is touched: a probe is proof the path works even
+    // though it records nothing, and what the watchdog needs to know is whether
+    // anything is arriving at all.
+    //
+    // Past the self-check above, and that ordering is load-bearing: our own
+    // broadcast comes back to our own listener, and if it counted as company
+    // then the watchdog's own probes would clear the flag that stops it running
+    // again, and discovery would rebuild itself once a second forever.
+    _silenceRepaired = false;
+
     switch (packet.type) {
       case AnnounceType.bye:
         if (table.remove(packet.id)) {
@@ -905,6 +930,61 @@ class DiscoveryService implements PeerSource {
     if (table.applyTimeouts(DateTime.now())) {
       _notify();
     }
+    _repairIfEveryPeerHasGoneQuiet();
+  }
+
+  /// Rebuilds discovery when every peer this device has ever heard from has
+  /// gone quiet at once — the watchdog, and the only repair here that nobody had
+  /// to ask for.
+  ///
+  /// Every other way back from a broken network in this class is triggered by
+  /// something: a datagram arriving, a lifecycle change, a finger on Rescan. The
+  /// failure this covers is the one where nothing arrives, so nothing triggers.
+  /// The device sits there with a list of peers it can no longer hear and, since
+  /// the broken direction is the one pointing at it, no amount of announcing
+  /// fixes it — the peers are not the ones who cannot hear.
+  ///
+  /// "Everyone silent" rather than "one peer silent" is the whole test. Some
+  /// peers being quiet while one is talking means the network is delivering
+  /// perfectly well and the quiet ones really have gone — rebuilding for that
+  /// would close the listening socket every time a laptop was shut.
+  ///
+  /// Hand-added peers do not count, in either direction. They are dialled over
+  /// TCP when the user opens them and are never expected to announce, so their
+  /// silence says nothing about whether the network works.
+  ///
+  /// Runs on the existing one-second tick rather than a timer of its own: the
+  /// threshold is tens of seconds, so a second of jitter costs nothing, and one
+  /// less timer is one less thing to cancel in [stop].
+  void _repairIfEveryPeerHasGoneQuiet() {
+    if (_refreshing || !_started || _silenceRepaired) {
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+    bool heardFromAnyone = false;
+    for (final Peer peer in table.peers) {
+      final DateTime? lastSeen = peer.lastSeen;
+      if (lastSeen == null) {
+        continue;
+      }
+      heardFromAnyone = true;
+      if (now.difference(lastSeen) < silentPeerAfter) {
+        return;
+      }
+    }
+    if (!heardFromAnyone) {
+      return;
+    }
+
+    _silenceRepaired = true;
+    _log(
+      'watchdog: nothing heard from any peer for '
+      '${silentPeerAfter.inSeconds}s, rebuilding discovery',
+    );
+    // The same rebuild a manual refresh performs, which is the point: the
+    // button the user was pressing to fix this is now pressed for them.
+    unawaited(_refresh());
   }
 
   void _notify() {

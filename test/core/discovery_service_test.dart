@@ -298,13 +298,16 @@ void main() {
         (RawDatagramSocket s) => s.address.address != '0.0.0.0',
       );
 
-  Future<void> startService() async {
+  Future<void> startService({
+    Duration silentPeerAfter = kSilentPeerRebindAfter,
+  }) async {
     port = await _servicePort();
     logs = <String>[];
     bound = <RawDatagramSocket>[];
     service = DiscoveryService(
       discoveryPort: port,
       onLog: logs.add,
+      silentPeerAfter: silentPeerAfter,
       bind: (InternetAddress address, int atPort) async {
         final RawDatagramSocket socket = await RawDatagramSocket.bind(
           address,
@@ -610,6 +613,78 @@ void main() {
     // burst and then the cancellation as well, and watching this still pass.
     // So this is a property test, not a test of either line: it fails if the
     // sockets ever outlive the goodbye, which is the refactor that would matter.
+  });
+
+  // --- The watchdog: repairing a network that has stopped delivering --------
+  //
+  // Every other repair in the service is triggered by something arriving — a
+  // datagram, a lifecycle change, a finger on Rescan. These cover the failure
+  // where nothing arrives, so nothing triggers, and the device list is left
+  // showing peers it can no longer hear.
+
+  test('a list of peers that has all gone quiet is rebuilt without being '
+      'asked', () async {
+    await startService(silentPeerAfter: const Duration(milliseconds: 300));
+    await peer.send(_announce(port: peer.port), port);
+    await _waitUntil(() => service.table.length == 1, reason: 'the peer');
+
+    final int before = listeners().length;
+    await _waitUntil(
+      () => listeners().length > before,
+      reason: 'discovery to rebuild itself once every peer had gone quiet',
+      diagnostics: () => '  logs=${logs.join(' | ')}',
+    );
+    expect(
+      logs.any((String line) => line.contains('watchdog')),
+      isTrue,
+      reason: 'and to say so, because this is the one repair nobody asked for '
+          'and there is otherwise no sign it happened\n  logs=${logs.join(' | ')}',
+    );
+  });
+
+  test('no repair is made while any peer is still talking', () async {
+    await startService(silentPeerAfter: const Duration(milliseconds: 300));
+    final int before = listeners().length;
+
+    // Several times the threshold, with an announce well inside it throughout.
+    // One peer talking is proof the network is delivering, so the quiet peers
+    // are the ones that really have gone and there is nothing here to repair.
+    final DateTime until = DateTime.now().add(const Duration(seconds: 3));
+    while (DateTime.now().isBefore(until)) {
+      await peer.send(_announce(port: peer.port), port);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+
+    expect(
+      listeners(),
+      hasLength(before),
+      reason: 'a rebuild here would close the listening socket every time a '
+          'laptop was shut, and it would be closing it on a working network',
+    );
+  });
+
+  test('one silence gets one repair, not one a second', () async {
+    await startService(silentPeerAfter: const Duration(milliseconds: 200));
+    await peer.send(_announce(port: peer.port), port);
+    await _waitUntil(() => service.table.length == 1, reason: 'the peer');
+
+    final int before = listeners().length;
+    await _waitUntil(
+      () => listeners().length > before,
+      reason: 'the first repair',
+    );
+    final int afterFirstRepair = listeners().length;
+
+    // The peer is still listed and still silent — it has gone home, not broken
+    // the network. Several watchdog ticks go by.
+    await Future<void>.delayed(const Duration(seconds: 4));
+    expect(
+      listeners(),
+      hasLength(afterFirstRepair),
+      reason: 'the repair to have been made once. Repeated every tick, it would '
+          'rebuild discovery over and over on a network where nothing is wrong '
+          'and the peer it waits for is simply gone',
+    );
   });
 
   // --- Recovering from a socket that has latched -----------------------------
