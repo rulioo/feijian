@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 
+import '../../core/models/message.dart';
 import '../database.dart';
 
 /// A position in a conversation's history, for paging — design.md §6.3.
@@ -200,12 +201,20 @@ class MessageDao {
   /// queued before the app was closed are still sent after it is reopened
   /// (§5.2 item 6). Ordered oldest-first because that is the order they are to
   /// be re-sent in, which is also the order they read in.
+  ///
+  /// **Text only.** This queue exists to put `msg` frames on the wire, and a
+  /// file message is not delivered that way — the transfer layer sends it over
+  /// its own data connection (§4.6). A pending file message selected here would
+  /// be sent as a `msg` carrying its empty `text`, so the peer would receive a
+  /// blank bubble and no file, and the ack would mark the transfer's message as
+  /// delivered while the bytes were still sitting on this disk.
   Future<List<MessageRow>> pendingFor(String peerId) {
     return (_db.select(_db.messages)
           ..where((Messages t) =>
               t.peerId.equals(peerId) &
               t.status.equals('pending') &
-              t.direction.equals('out'))
+              t.direction.equals('out') &
+              t.type.equals(MessageType.text.wire))
           ..orderBy(<OrderingTerm Function(Messages)>[
             (Messages t) => OrderingTerm.asc(t.createdAt),
             (Messages t) => OrderingTerm.asc(t.id),
@@ -214,14 +223,63 @@ class MessageDao {
   }
 
   /// Every message still owed to anyone, for the sweep after a restart.
+  ///
+  /// Text only, for the same reason as [pendingFor]: the file transfer's own
+  /// recovery is the transfer layer's job, not this queue's.
   Future<List<MessageRow>> allPending() {
     return (_db.select(_db.messages)
           ..where((Messages t) =>
-              t.status.equals('pending') & t.direction.equals('out'))
+              t.status.equals('pending') &
+              t.direction.equals('out') &
+              t.type.equals(MessageType.text.wire))
           ..orderBy(<OrderingTerm Function(Messages)>[
             (Messages t) => OrderingTerm.asc(t.createdAt),
           ]))
         .get();
+  }
+
+  /// The `created_at` a new message in [conversation] gets: [at], pushed past
+  /// the newest timestamp the conversation already holds.
+  ///
+  /// Without this, two messages written in the same millisecond have **no
+  /// defined order**. `created_at` is a millisecond, and both orderings that
+  /// read it break the tie on `id` — a random v4 UUID. So `pendingFor` sent a
+  /// queue in a different order each run, and `page` displayed whatever order
+  /// the UUIDs happened to compare in. That is not theoretical: the §5.2 test
+  /// for flush order failed about one run in six, with the three messages
+  /// arriving in a different order each time, and the flush is the worst case
+  /// rather than a rare one — a queue that comes out all at once writes three
+  /// messages inside a single millisecond. On the receiving side the same
+  /// collision happens whenever a burst arrives, since an incoming message is
+  /// stamped with the *receiver's* clock (§4.5).
+  ///
+  /// The fix belongs here rather than in the two `order by` clauses because the
+  /// orderings are also used as keyset cursors (see [page]), where a tiebreaker
+  /// has to be a value the caller can carry — and a monotonic timestamp keeps
+  /// every existing query and cursor correct as they are.
+  ///
+  /// [ConversationRow.lastMsgAt] is the previous maximum: [bumpConversation]
+  /// only ever moves it forward and every insert passes its own timestamp, so it
+  /// is the maximum over the conversation's messages, and reading it costs a
+  /// primary-key lookup rather than a scan.
+  ///
+  /// Every caller runs this inside the transaction that does the insert. That is
+  /// load-bearing: it is what stops two concurrent writes from reading the same
+  /// maximum and colliding again. Drift serializes transactions, so the second
+  /// one sees the first one's commit.
+  ///
+  /// The timestamp can therefore run slightly ahead of the wall clock — by one
+  /// millisecond per message in a burst. That is the standard trade a chat log
+  /// makes, and it is bounded by the burst size: it cannot drift without
+  /// messages to justify it.
+  ///
+  /// Lives on the DAO rather than on one repository because there is more than
+  /// one writer of messages: a file transfer stores its own message row
+  /// ([TransferRepository]), and a second copy of this rule would be a second
+  /// answer to a question the cursors above depend on having one answer to.
+  int nextCreatedAt(ConversationRow conversation, int at) {
+    final int? newest = conversation.lastMsgAt;
+    return newest == null || at > newest ? at : newest + 1;
   }
 
   /// Moves a message along its delivery state machine (§4.5).
@@ -239,24 +297,26 @@ class MessageDao {
     int? retryCount,
   }) {
     final update = _db.update(_db.messages)
-      ..where((Messages t) =>
-          status == 'sent'
-              ? t.id.equals(id) & t.status.equals('delivered').not()
-              : t.id.equals(id));
+      ..where((Messages t) => status == 'sent'
+          ? t.id.equals(id) & t.status.equals('delivered').not()
+          : t.id.equals(id));
 
     return update.write(MessagesCompanion(
       status: Value<String>(status),
       // Absent rather than null when not supplied: nulling `delivered_at` on an
       // unrelated transition would erase when the message actually arrived.
-      deliveredAt:
-          deliveredAt == null ? const Value<int>.absent() : Value<int>(deliveredAt),
-      retryCount:
-          retryCount == null ? const Value<int>.absent() : Value<int>(retryCount),
+      deliveredAt: deliveredAt == null
+          ? const Value<int>.absent()
+          : Value<int>(deliveredAt),
+      retryCount: retryCount == null
+          ? const Value<int>.absent()
+          : Value<int>(retryCount),
     ));
   }
 
   Future<int> deleteById(String id) {
-    return (_db.delete(_db.messages)..where((Messages t) => t.id.equals(id))).go();
+    return (_db.delete(_db.messages)..where((Messages t) => t.id.equals(id)))
+        .go();
   }
 
   /// Deletes every message in a conversation — design.md §6.3's "clear history".

@@ -62,6 +62,16 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get discoveryFailedTitle => 'Device discovery is not running';
+
+  @override
+  String get discoveryFailedBody =>
+      'This device could not open the port it listens on, so the list below cannot fill no matter who is on your network. Press Rescan to try again.';
+
+  @override
+  String get discoveryFailedDetail => 'Details';
+
+  @override
   String get addDeviceByIp => 'Add device by IP';
 
   @override
@@ -107,7 +117,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addDeviceSelf => 'That address is this device.';
 
   @override
-  String get addDeviceOffline => 'Cannot add a device: the network service is not running.';
+  String get addDeviceOffline =>
+      'Cannot add a device: the network service is not running.';
 
   @override
   String get removeDevice => 'Remove device';
@@ -128,7 +139,8 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get chatEmptyNoPeer => 'Select a device on the left to start chatting.';
+  String get chatEmptyNoPeer =>
+      'Select a device on the left to start chatting.';
 
   @override
   String get composerHint => 'Type a message...';
@@ -181,6 +193,98 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get historyCleared => 'History cleared';
+
+  @override
+  String fileSizeBytes(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count bytes',
+      one: '1 byte',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String filePercent(int percent) {
+    return '$percent%';
+  }
+
+  @override
+  String get transferWaiting => 'Waiting';
+
+  @override
+  String get transferAwaitingAnswer => 'Waiting for your answer';
+
+  @override
+  String get transferDone => 'Completed';
+
+  @override
+  String get transferFailed => 'Failed';
+
+  @override
+  String get transferCancelled => 'Cancelled';
+
+  @override
+  String get transferDeclined => 'Declined';
+
+  @override
+  String get fileOpen => 'Open';
+
+  @override
+  String get fileSaveAs => 'Save as...';
+
+  @override
+  String get fileOpenFailed =>
+      'There is no app on this device that can open this file.';
+
+  @override
+  String get fileMissing => 'The file is no longer on this device.';
+
+  @override
+  String get fileSaved => 'Saved';
+
+  @override
+  String get fileSaveFailed => 'The file could not be saved.';
+
+  @override
+  String get fileCancelled => 'Transfer cancelled';
+
+  @override
+  String fileSendFailed(String file) {
+    return 'Could not send $file.';
+  }
+
+  @override
+  String get fileTooManyTransfers =>
+      'Too many files are already moving. Wait for one to finish and try again.';
+
+  @override
+  String get fileFolderNotYet =>
+      'Sending a folder is not in this version yet. Send the files inside it instead.';
+
+  @override
+  String get fileDropToSend => 'Drop to send';
+
+  @override
+  String get fileOfferTitle => 'Incoming file';
+
+  @override
+  String fileOfferBody(String name, String file, String size) {
+    return '$name wants to send you $file ($size)';
+  }
+
+  @override
+  String get fileAccept => 'Accept';
+
+  @override
+  String get fileDecline => 'Decline';
+
+  @override
+  String get fileActionResultAccept => 'Accepted';
+
+  @override
+  String get fileActionResultDecline => 'Declined';
 
   @override
   String get peerInfoId => 'Device ID';
@@ -245,7 +349,8 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get settingsAutoAcceptTrusted => 'Accept everything from trusted devices';
+  String get settingsAutoAcceptTrusted =>
+      'Accept everything from trusted devices';
 
   @override
   String get settingsListenPort => 'Listen port';
@@ -257,7 +362,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsEnabledInterfaces => 'Network interfaces';
 
   @override
-  String get settingsEnabledInterfacesHint => 'Uncheck virtual adapters (Hyper-V, VMware, WSL) if some devices are missing from the list.';
+  String get settingsEnabledInterfacesHint =>
+      'Uncheck virtual adapters (Hyper-V, VMware, WSL) if some devices are missing from the list.';
 
   @override
   String get settingsNotifications => 'Message notifications';
@@ -272,7 +378,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsBackgroundService => 'Stay reachable in background';
 
   @override
-  String get settingsBackgroundServiceHint => 'Shows a permanent notification. Without it, messages cannot be received while the app is in the background.';
+  String get settingsBackgroundServiceHint =>
+      'Shows a permanent notification. Without it, messages cannot be received while the app is in the background.';
 
   @override
   String get settingsLanguage => 'App language';
@@ -329,7 +436,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get historyLoadFailed => 'Could not load this conversation.';
 
   @override
-  String get sendUnavailable => 'Cannot send messages: the network service is not running.';
+  String get sendUnavailable =>
+      'Cannot send messages: the network service is not running.';
 
   @override
   String get loadingOlderMessages => 'Loading earlier messages...';

@@ -61,7 +61,8 @@ import 'app_localizations_en.dart';
 /// be consistent with the languages listed in the AppLocalizations.supportedLocales
 /// property.
 abstract class AppLocalizations {
-  AppLocalizations(String locale) : localeName = intl.Intl.canonicalizedLocale(locale.toString());
+  AppLocalizations(String locale)
+      : localeName = intl.Intl.canonicalizedLocale(locale.toString());
 
   final String localeName;
 
@@ -69,7 +70,8 @@ abstract class AppLocalizations {
     return Localizations.of<AppLocalizations>(context, AppLocalizations)!;
   }
 
-  static const LocalizationsDelegate<AppLocalizations> delegate = _AppLocalizationsDelegate();
+  static const LocalizationsDelegate<AppLocalizations> delegate =
+      _AppLocalizationsDelegate();
 
   /// A list of this localizations delegate along with the default localizations
   /// delegates.
@@ -81,7 +83,8 @@ abstract class AppLocalizations {
   /// Additional delegates can be added by appending to this list in
   /// MaterialApp. This list does not have to be used at all if a custom list
   /// of delegates is preferred or required.
-  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates = <LocalizationsDelegate<dynamic>>[
+  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates =
+      <LocalizationsDelegate<dynamic>>[
     delegate,
     GlobalMaterialLocalizations.delegate,
     GlobalCupertinoLocalizations.delegate,
@@ -89,9 +92,7 @@ abstract class AppLocalizations {
   ];
 
   /// A list of this localizations delegate's supported locales.
-  static const List<Locale> supportedLocales = <Locale>[
-    Locale('en')
-  ];
+  static const List<Locale> supportedLocales = <Locale>[Locale('en')];
 
   /// No description provided for @appName.
   ///
@@ -176,6 +177,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Your firewall allows Feijian (TCP and UDP port {port})'**
   String scanningHintFirewall(int port);
+
+  /// No description provided for @discoveryFailedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Device discovery is not running'**
+  String get discoveryFailedTitle;
+
+  /// No description provided for @discoveryFailedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This device could not open the port it listens on, so the list below cannot fill no matter who is on your network. Press Rescan to try again.'**
+  String get discoveryFailedBody;
+
+  /// No description provided for @discoveryFailedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Details'**
+  String get discoveryFailedDetail;
 
   /// No description provided for @addDeviceByIp.
   ///
@@ -386,6 +405,156 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'History cleared'**
   String get historyCleared;
+
+  /// No description provided for @fileSizeBytes.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 byte} other{{count} bytes}}'**
+  String fileSizeBytes(int count);
+
+  /// No description provided for @filePercent.
+  ///
+  /// In en, this message translates to:
+  /// **'{percent}%'**
+  String filePercent(int percent);
+
+  /// No description provided for @transferWaiting.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting'**
+  String get transferWaiting;
+
+  /// No description provided for @transferAwaitingAnswer.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for your answer'**
+  String get transferAwaitingAnswer;
+
+  /// No description provided for @transferDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Completed'**
+  String get transferDone;
+
+  /// No description provided for @transferFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed'**
+  String get transferFailed;
+
+  /// No description provided for @transferCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancelled'**
+  String get transferCancelled;
+
+  /// No description provided for @transferDeclined.
+  ///
+  /// In en, this message translates to:
+  /// **'Declined'**
+  String get transferDeclined;
+
+  /// No description provided for @fileOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get fileOpen;
+
+  /// No description provided for @fileSaveAs.
+  ///
+  /// In en, this message translates to:
+  /// **'Save as...'**
+  String get fileSaveAs;
+
+  /// No description provided for @fileOpenFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'There is no app on this device that can open this file.'**
+  String get fileOpenFailed;
+
+  /// No description provided for @fileMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The file is no longer on this device.'**
+  String get fileMissing;
+
+  /// No description provided for @fileSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved'**
+  String get fileSaved;
+
+  /// No description provided for @fileSaveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The file could not be saved.'**
+  String get fileSaveFailed;
+
+  /// No description provided for @fileCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'Transfer cancelled'**
+  String get fileCancelled;
+
+  /// No description provided for @fileSendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not send {file}.'**
+  String fileSendFailed(String file);
+
+  /// No description provided for @fileTooManyTransfers.
+  ///
+  /// In en, this message translates to:
+  /// **'Too many files are already moving. Wait for one to finish and try again.'**
+  String get fileTooManyTransfers;
+
+  /// No description provided for @fileFolderNotYet.
+  ///
+  /// In en, this message translates to:
+  /// **'Sending a folder is not in this version yet. Send the files inside it instead.'**
+  String get fileFolderNotYet;
+
+  /// No description provided for @fileDropToSend.
+  ///
+  /// In en, this message translates to:
+  /// **'Drop to send'**
+  String get fileDropToSend;
+
+  /// No description provided for @fileOfferTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Incoming file'**
+  String get fileOfferTitle;
+
+  /// No description provided for @fileOfferBody.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} wants to send you {file} ({size})'**
+  String fileOfferBody(String name, String file, String size);
+
+  /// No description provided for @fileAccept.
+  ///
+  /// In en, this message translates to:
+  /// **'Accept'**
+  String get fileAccept;
+
+  /// No description provided for @fileDecline.
+  ///
+  /// In en, this message translates to:
+  /// **'Decline'**
+  String get fileDecline;
+
+  /// No description provided for @fileActionResultAccept.
+  ///
+  /// In en, this message translates to:
+  /// **'Accepted'**
+  String get fileActionResultAccept;
+
+  /// No description provided for @fileActionResultDecline.
+  ///
+  /// In en, this message translates to:
+  /// **'Declined'**
+  String get fileActionResultDecline;
 
   /// No description provided for @peerInfoId.
   ///
@@ -712,7 +881,8 @@ abstract class AppLocalizations {
   String get close;
 }
 
-class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
+class _AppLocalizationsDelegate
+    extends LocalizationsDelegate<AppLocalizations> {
   const _AppLocalizationsDelegate();
 
   @override
@@ -721,24 +891,23 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
   }
 
   @override
-  bool isSupported(Locale locale) => <String>['en'].contains(locale.languageCode);
+  bool isSupported(Locale locale) =>
+      <String>['en'].contains(locale.languageCode);
 
   @override
   bool shouldReload(_AppLocalizationsDelegate old) => false;
 }
 
 AppLocalizations lookupAppLocalizations(Locale locale) {
-
-
   // Lookup logic when only language code is specified.
   switch (locale.languageCode) {
-    case 'en': return AppLocalizationsEn();
+    case 'en':
+      return AppLocalizationsEn();
   }
 
   throw FlutterError(
-    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-    'an issue with the localizations generation tool. Please file an issue '
-    'on GitHub with a reproducible sample app and the gen-l10n configuration '
-    'that was used.'
-  );
+      'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+      'an issue with the localizations generation tool. Please file an issue '
+      'on GitHub with a reproducible sample app and the gen-l10n configuration '
+      'that was used.');
 }

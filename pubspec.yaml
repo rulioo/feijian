@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+5
+version: 1.0.0+6
 
 environment:
   sdk: ^3.6.2
@@ -57,11 +57,22 @@ dependencies:
   sqlite3: ^2.4.0
   # Ships the native SQLite that the app itself links against on every platform.
   sqlite3_flutter_libs: ^0.5.24
+  # --- M3: file transfer (design.md §6.3) ---
+  # The composer's attach buttons and the "Save as..." action.
+  file_picker: ^11.0.3
+  # Dropping files onto the window, which is how Windows users send things.
+  desktop_drop: ^0.8.4
+  # The fullscreen image viewer's zoom and pan.
+  photo_view: ^0.15.0
+  # Handing a received file to the system's default program. Not in the plan
+  # above because it is not a *choice* the way the other three are: §6.3 says a
+  # finished file card opens on tap, and on Android that is an Intent, which
+  # cannot be sent from pure Dart.
+  open_filex: ^4.7.0
 
   # Heavier dependencies are deliberately NOT added yet — each lands with the
-  # milestone that needs it: file_picker + desktop_drop + photo_view (M3
-  # transfer), flutter_local_notifications + tray_manager + window_manager +
-  # flutter_foreground_task (M5 polish).
+  # milestone that needs it: flutter_local_notifications + tray_manager +
+  # window_manager + flutter_foreground_task (M5 polish).
 
 dev_dependencies:
   flutter_test:

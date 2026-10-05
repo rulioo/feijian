@@ -31,7 +31,8 @@ void main() {
       );
 
       final String header = utf8.decode(bytes.sublist(4));
-      expect(ByteData.view(bytes.buffer).getUint32(0, Endian.big), header.length);
+      expect(
+          ByteData.view(bytes.buffer).getUint32(0, Endian.big), header.length);
       expect(jsonDecode(header), <String, Object?>{'type': 'ping', 'ts': 1});
     });
 
@@ -44,7 +45,8 @@ void main() {
 
     test('declares the payload length as size', () {
       final Uint8List bytes = FrameCodec.encode(
-        Frame.of(FrameType.fileData, <String, Object?>{'xferId': 'x'}, Uint8List.fromList(<int>[1, 2, 3])),
+        Frame.of(FrameType.fileData, <String, Object?>{'xferId': 'x'},
+            Uint8List.fromList(<int>[1, 2, 3])),
       );
       final Map<String, Object?> header =
           jsonDecode(utf8.decode(bytes.sublist(4, bytes.length - 3)))
@@ -63,17 +65,20 @@ void main() {
           Uint8List.fromList(<int>[7, 7]),
         ),
       );
-      expect(jsonDecode(utf8.decode(bytes.sublist(4, bytes.length - 2))), <String, Object?>{
-        'type': 'file_data',
-        'xferId': 'x',
-        'size': 2,
-      });
+      expect(
+          jsonDecode(utf8.decode(bytes.sublist(4, bytes.length - 2))),
+          <String, Object?>{
+            'type': 'file_data',
+            'xferId': 'x',
+            'size': 2,
+          });
     });
 
     test('refuses a payload over the cap', () {
       expect(
         () => FrameCodec.encode(
-          Frame.of(FrameType.fileData, const <String, Object?>{}, Uint8List(kMaxPayload + 1)),
+          Frame.of(FrameType.fileData, const <String, Object?>{},
+              Uint8List(kMaxPayload + 1)),
         ),
         throwsA(isA<FrameException>()),
       );
@@ -94,7 +99,8 @@ void main() {
   group('FrameDecoder', () {
     test('round-trips a payload-free frame', () {
       final List<Frame> frames = FrameDecoder().add(
-        FrameCodec.encode(Frame.of(FrameType.ping, <String, Object?>{'ts': 42})),
+        FrameCodec.encode(
+            Frame.of(FrameType.ping, <String, Object?>{'ts': 42})),
       );
       expect(frames, hasLength(1));
       expect(frames.single.type, 'ping');
@@ -106,7 +112,8 @@ void main() {
       final List<int> payload = List<int>.generate(300, (int i) => i % 256);
       final List<Frame> frames = FrameDecoder().add(
         FrameCodec.encode(
-          Frame.of(FrameType.fileData, const <String, Object?>{}, Uint8List.fromList(payload)),
+          Frame.of(FrameType.fileData, const <String, Object?>{},
+              Uint8List.fromList(payload)),
         ),
       );
       expect(frames.single.payload, payload);
@@ -135,16 +142,19 @@ void main() {
     test('returns every frame when several arrive in one chunk', () {
       final BytesBuilder all = BytesBuilder();
       for (int i = 0; i < 5; i++) {
-        all.add(FrameCodec.encode(Frame.of(FrameType.msg, <String, Object?>{'msgId': '$i'})));
+        all.add(FrameCodec.encode(
+            Frame.of(FrameType.msg, <String, Object?>{'msgId': '$i'})));
       }
 
       final List<Frame> frames = FrameDecoder().add(all.takeBytes());
-      expect(frames.map((Frame f) => f.header['msgId']), <String>['0', '1', '2', '3', '4']);
+      expect(frames.map((Frame f) => f.header['msgId']),
+          <String>['0', '1', '2', '3', '4']);
     });
 
     test('holds a partial frame until the rest arrives', () {
       final FrameDecoder decoder = FrameDecoder();
-      final Uint8List bytes = FrameCodec.encode(Frame.of(FrameType.ping, <String, Object?>{'ts': 1}));
+      final Uint8List bytes = FrameCodec.encode(
+          Frame.of(FrameType.ping, <String, Object?>{'ts': 1}));
 
       expect(decoder.add(bytes.sublist(0, bytes.length - 1)), isEmpty);
       expect(decoder.add(bytes.sublist(bytes.length - 1)), hasLength(1));
@@ -156,9 +166,11 @@ void main() {
 
     test('survives a large payload split across chunks', () {
       final FrameDecoder decoder = FrameDecoder();
-      final List<int> payload = List<int>.generate(kMaxPayload, (int i) => i % 256);
+      final List<int> payload =
+          List<int>.generate(kMaxPayload, (int i) => i % 256);
       final Uint8List bytes = FrameCodec.encode(
-        Frame.of(FrameType.fileData, const <String, Object?>{}, Uint8List.fromList(payload)),
+        Frame.of(FrameType.fileData, const <String, Object?>{},
+            Uint8List.fromList(payload)),
       );
 
       // Deliberately awkward split points: mid-length-prefix and mid-header.
@@ -171,10 +183,60 @@ void main() {
       expect(got.single.payload, payload);
     });
 
+    test('a stream arriving on socket boundaries does not run off the buffer',
+        () {
+      // The buffer keeps one backing array and walks a cursor through it, so the
+      // bytes already consumed still count towards the array's length. Sizing an
+      // arriving chunk against the *live* bytes rather than against the room
+      // left after the write cursor understates by exactly the consumed part,
+      // and the write goes off the end: a `RangeError` out of the decoder,
+      // mid-transfer, on the connection carrying the file.
+      //
+      // What makes it happen is that the cursor is part-way through a frame. A
+      // socket does not deliver whole frames — it delivers whatever arrived — so
+      // the stream is fed here in fixed pieces that land mid-frame on purpose,
+      // which is how a real 1 MB transfer at 64 KiB per chunk found it: the
+      // receiver's data connection died at 320 KiB of 1024.
+      final BytesBuilder stream = BytesBuilder();
+      for (int i = 0; i < 20; i++) {
+        stream.add(
+          FrameCodec.encode(
+            Frame.of(
+              FrameType.fileData,
+              <String, Object?>{'xferId': 'x1', 'offset': i * 65536},
+              Uint8List.fromList(
+                List<int>.generate(65536, (int b) => (b + i) % 256),
+              ),
+            ),
+          ),
+        );
+      }
+
+      final Uint8List all = stream.takeBytes();
+      final FrameDecoder decoder = FrameDecoder();
+      final List<Frame> got = <Frame>[];
+      for (int at = 0; at < all.length; at += 8192) {
+        got.addAll(
+          decoder.add(
+            all.sublist(at, at + 8192 > all.length ? all.length : at + 8192),
+          ),
+        );
+      }
+
+      expect(got, hasLength(20));
+      expect(
+        got.every((Frame f) => f.payload!.length == 65536),
+        isTrue,
+        reason: 'every chunk came back whole',
+      );
+      expect(got.last.header['offset'], 19 * 65536);
+    });
+
     test('carries a UTF-8 message body intact', () {
       const String text = '你好，世界 🌏 — okay?';
       final List<Frame> frames = FrameDecoder().add(
-        FrameCodec.encode(Frame.of(FrameType.msg, <String, Object?>{'text': text})),
+        FrameCodec.encode(
+            Frame.of(FrameType.msg, <String, Object?>{'text': text})),
       );
       expect(frames.single.header['text'], text);
     });
@@ -276,12 +338,14 @@ void main() {
 
       decoder.reset();
       expect(decoder.isBroken, isFalse);
-      expect(decoder.add(FrameCodec.encode(Frame.of(FrameType.ping))), hasLength(1));
+      expect(decoder.add(FrameCodec.encode(Frame.of(FrameType.ping))),
+          hasLength(1));
     });
   });
 
   group('the size key is reserved for the frame layer', () {
-    test('a file offer reporting a multi-gigabyte total is not read as a frame '
+    test(
+        'a file offer reporting a multi-gigabyte total is not read as a frame '
         'length', () {
       // Regression guard. §4.2 declares the payload length as `size`, and §4.3
       // originally gave `file_offer` a `size` meaning the file's total — one

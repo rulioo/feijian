@@ -4,12 +4,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models/message.dart';
 import '../core/models/peer.dart';
+import '../core/models/transfer.dart';
 import '../data/dao/message_dao.dart';
 import '../data/repository/chat_repository.dart';
+import '../data/repository/transfer_repository.dart';
 import 'data_providers.dart';
 import 'lan_provider.dart';
 import 'lan_service.dart';
 import 'providers.dart';
+import 'transfer_provider.dart';
+import 'transfer_service.dart';
 
 /// What a conversation looks like to the chat page — design.md §6.3.
 ///
@@ -20,6 +24,7 @@ import 'providers.dart';
 class ChatState {
   const ChatState({
     this.messages = const <Message>[],
+    this.attachments = const <String, Attachment>{},
     this.oldest,
     this.hasMore = false,
     this.loadingOlder = false,
@@ -27,6 +32,14 @@ class ChatState {
   });
 
   final List<Message> messages;
+
+  /// The file behind each message that has one, keyed by message id (§5.1).
+  ///
+  /// Beside [messages] rather than on them, because a [Message] is the row the
+  /// `message` table holds and an attachment is a different table's row. Text
+  /// messages have no entry, which is not a gap to be filled — it is the answer
+  /// to "is there a file here", and the bubble reads it that way.
+  final Map<String, Attachment> attachments;
 
   /// Position of the oldest loaded message, for the next page back.
   final MessageCursor? oldest;
@@ -42,14 +55,19 @@ class ChatState {
 
   ChatState copyWith({
     List<Message>? messages,
+    Map<String, Attachment>? attachments,
     MessageCursor? oldest,
     bool? hasMore,
     bool? loadingOlder,
     String? draft,
     bool clearDraft = false,
+    bool clearAttachments = false,
   }) {
     return ChatState(
       messages: messages ?? this.messages,
+      attachments: clearAttachments
+          ? const <String, Attachment>{}
+          : attachments ?? this.attachments,
       oldest: oldest ?? this.oldest,
       hasMore: hasMore ?? this.hasMore,
       loadingOlder: loadingOlder ?? this.loadingOlder,
@@ -73,7 +91,39 @@ final AutoDisposeAsyncNotifierProviderFamily<ChatController, ChatState, String>
 class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
   late final ChatRepository _chat = ref.read(chatRepositoryProvider);
 
+  /// Read separately from [_chat] because the attachments are a different
+  /// table's rows, and the repository that owns their mapping is the transfer
+  /// one. Composing the two into a page is this layer's job, not either
+  /// repository's.
+  late final TransferRepository _transfers = ref.read(
+    transferRepositoryProvider,
+  );
+
   Timer? _draftTimer;
+
+  /// The newest state of every transfer this conversation has seen move, keyed
+  /// by attachment id.
+  ///
+  /// Progress is the one thing about a transfer that is *not* in the database —
+  /// §4.6.1 writes the row on a checkpoint rather than per chunk, because a 1 GB
+  /// file would otherwise be four thousand writes — so a bubble that read only
+  /// the row would advance in 2 MB steps. This is where the smooth value comes
+  /// from.
+  ///
+  /// It outlives the transfer on purpose: the last emission is the ending, and
+  /// dropping the entry when it finished would send the bubble back to a row the
+  /// page may not have re-read yet.
+  final Map<String, Transfer> _live = <String, Transfer>{};
+
+  /// Message ids whose row this controller has already gone looking for.
+  ///
+  /// A transfer reports itself before the chat page knows its message exists —
+  /// the message is written by the transfer layer, and the page learns about new
+  /// messages through a channel transfers do not use. So the first mention of an
+  /// unknown message is answered with a re-read; without this set, every chunk
+  /// of that same transfer would ask again, and a 1 GB file would be eight
+  /// thousand page queries.
+  final Set<String> _lookedFor = <String>{};
 
   String get peerId => arg;
 
@@ -86,9 +136,21 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
     final StreamSubscription<String>? changes = service?.messagesChanged
         .where((String id) => id == peerId)
         .listen((String _) => unawaited(refresh()));
+
+    // The transfer engine, for the two things the database cannot say in time:
+    // how far a file has got, and that a file exists at all. Watched rather than
+    // read, so a rebuilt engine — a new listen port, a new manager — replaces
+    // this subscription instead of leaving it on a disposed stream.
+    final TransferService? transfers =
+        ref.watch(transferServiceProvider).valueOrNull;
+    final StreamSubscription<Transfer>? moving = transfers?.changes
+        .where((Transfer t) => t.peerId == peerId)
+        .listen(_onTransferChanged);
+
     ref.onDispose(() {
       _draftTimer?.cancel();
       unawaited(changes?.cancel());
+      unawaited(moving?.cancel());
     });
 
     // A conversation the user opened is a device worth being connected to, even
@@ -99,11 +161,14 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
     }
 
     final List<Message> newest = await _chat.page(peerId);
+    final Map<String, Attachment> attachments = await _transfers
+        .attachmentsForMessages(newest.map((Message m) => m.id));
     final String? draft = await _chat.draftFor(peerId);
     await _chat.markRead(peerId);
 
     return ChatState(
       messages: newest.reversed.toList(growable: false),
+      attachments: attachments,
       oldest: ChatRepository.cursorBefore(newest),
       hasMore: newest.length == ChatRepository.kPageSize,
       draft: draft,
@@ -160,11 +225,14 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
     if (current == null) {
       return;
     }
+    final Map<String, Attachment> attachments =
+        Map<String, Attachment>.of(current.attachments)..remove(msgId);
     state = AsyncData<ChatState>(
       current.copyWith(
         messages: current.messages
             .where((Message m) => m.id != msgId)
             .toList(growable: false),
+        attachments: attachments,
       ),
     );
   }
@@ -182,6 +250,9 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
   /// alone for the same reason.
   Future<void> clearHistory() async {
     await _chat.clearHistory(peerId);
+    // The attachments go with the messages they belong to. A map that kept them
+    // would be holding rows for messages this conversation no longer has, and
+    // the next refresh would look them up by ids that are gone.
     state = AsyncData<ChatState>(ChatState(draft: state.valueOrNull?.draft));
   }
 
@@ -198,6 +269,7 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
       before: current.oldest,
       limit: ChatRepository.kPageSize,
     );
+    final Map<String, Attachment> attachments = await _attachmentsOf(older);
 
     // The list may have been refreshed while this page was in flight; merge into
     // whatever is there now rather than overwriting it.
@@ -205,10 +277,89 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
     state = AsyncData<ChatState>(
       latest.copyWith(
         messages: _merge(older, latest.messages, const <Message>[]),
+        attachments: <String, Attachment>{
+          ...latest.attachments,
+          ...attachments,
+        },
         // The cursor only ever moves backwards.
         oldest: ChatRepository.cursorBefore(older) ?? latest.oldest,
         hasMore: older.length == ChatRepository.kPageSize,
         loadingOlder: false,
+      ),
+    );
+  }
+
+  /// The attachments behind [messages], in the shape [ChatState] holds them.
+  ///
+  /// A refresh reads up to [_maxRefreshPages] pages in a loop and then attaches
+  /// them in one go rather than one page at a time: the messages are merged into
+  /// a map keyed by id, and asking per page would be the same query split into
+  /// eight.
+  Future<Map<String, Attachment>> _attachmentsOf(List<Message> messages) async {
+    final Map<String, Attachment> stored = await _transfers
+        .attachmentsForMessages(messages.map((Message m) => m.id));
+    return <String, Attachment>{
+      for (final MapEntry<String, Attachment> entry in stored.entries)
+        entry.key: _withLive(entry.value),
+    };
+  }
+
+  /// [attachment], with the live transfer folded in if there is one.
+  ///
+  /// Without this the progress bar goes backwards. The row is written every
+  /// couple of megabytes, so a refresh triggered by an unrelated message — a
+  /// text arriving mid-transfer — reads a value that is seconds behind what is
+  /// on screen, and a bar at 40% would drop to 32% for no reason the user can
+  /// see.
+  ///
+  /// The live value always wins rather than the newer of the two: there is no
+  /// timestamp on an [Attachment] to compare, and the service is the thing
+  /// writing the row, so nothing it has not reported can be ahead of it. Once a
+  /// transfer ends the service stops reporting, and the last thing it reported
+  /// was the ending — which is also what the row says by then.
+  Attachment _withLive(Attachment attachment) {
+    final Transfer? live = _live[attachment.id];
+    if (live == null) {
+      return attachment;
+    }
+    return attachment.copyWith(
+      state: live.state,
+      transferred: live.bytesDone,
+    );
+  }
+
+  void _onTransferChanged(Transfer transfer) {
+    final String? attachmentId = transfer.attachmentId;
+    if (attachmentId == null) {
+      return;
+    }
+    _live[attachmentId] = transfer;
+
+    final ChatState? current = state.valueOrNull;
+    if (current == null) {
+      return;
+    }
+    final String? messageId = transfer.messageId;
+    if (messageId == null) {
+      return;
+    }
+    final Attachment? attachment = current.attachments[messageId];
+    if (attachment == null) {
+      // A file the page has not loaded: either brand new, or older than the
+      // window the user has scrolled to. Asked about once per id — see
+      // [_lookedFor] — because the alternative is a page query per 256 KB.
+      if (_lookedFor.add(messageId)) {
+        unawaited(refresh());
+      }
+      return;
+    }
+
+    state = AsyncData<ChatState>(
+      current.copyWith(
+        attachments: <String, Attachment>{
+          ...current.attachments,
+          messageId: _withLive(attachment),
+        },
       ),
     );
   }
@@ -227,9 +378,8 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
     // Read pages until the oldest message already held turns up, so the window
     // grows with new arrivals instead of sliding and dropping history the user
     // has scrolled back to.
-    final String? anchor = current.messages.isEmpty
-        ? null
-        : current.messages.first.id;
+    final String? anchor =
+        current.messages.isEmpty ? null : current.messages.first.id;
     final List<Message> fetched = <Message>[];
     MessageCursor? cursor;
     // Bounded: a conversation someone has been reading all day should not turn
@@ -250,10 +400,18 @@ class ChatController extends AutoDisposeFamilyAsyncNotifier<ChatState, String> {
       cursor = ChatRepository.cursorBefore(rows);
     }
 
+    final Map<String, Attachment> attachments = await _attachmentsOf(fetched);
     final ChatState latest = state.valueOrNull ?? current;
     state = AsyncData<ChatState>(
       latest.copyWith(
         messages: _merge(const <Message>[], latest.messages, fetched),
+        // Freshly read attachments win: a transfer that moved while this was in
+        // flight has already written the newer row, and the read above is the
+        // one that saw it.
+        attachments: <String, Attachment>{
+          ...latest.attachments,
+          ...attachments,
+        },
         // Keep the furthest-back position reached; a refresh never loses
         // pagination the user has already paid for.
         oldest: _olderOf(latest.oldest, ChatRepository.cursorBefore(fetched)),

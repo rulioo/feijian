@@ -3,7 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/models/message.dart';
+import '../../core/models/transfer.dart';
 import '../../l10n/app_localizations.dart';
+import 'attachment_card.dart';
+import 'attachment_image.dart';
 
 /// One message in a conversation — design.md §6.3.
 ///
@@ -23,19 +26,47 @@ class MessageBubble extends StatelessWidget {
   const MessageBubble({
     required this.message,
     required this.onRetry,
+    this.attachment,
+    this.onOpen,
+    this.onSaveAs,
+    this.onCancel,
+    this.onAccept,
+    this.onDecline,
+    this.onOpenImage,
     this.onDelete,
     super.key,
   });
 
   final Message message;
 
+  /// The file this message carries, or null for a text message.
+  ///
+  /// Passed in rather than looked up: it lives in another table and is read a
+  /// page at a time by [ChatController], so a bubble that fetched its own would
+  /// turn one query into fifty.
+  final Attachment? attachment;
+
   /// Called when the user taps a failed message's warning icon.
   final VoidCallback onRetry;
 
+  /// Hand a finished file to the system. Null hides the button.
+  final VoidCallback? onOpen;
+
+  /// Copy a finished file somewhere the user chooses. Null hides the button.
+  final VoidCallback? onSaveAs;
+
+  /// Stop a transfer that is moving, or one that has not started.
+  final VoidCallback? onCancel;
+
+  /// The two answers to an offer, offered together.
+  final VoidCallback? onAccept;
+  final VoidCallback? onDecline;
+
+  /// Opens a picture full screen. Null leaves the thumbnail inert, which is what
+  /// a bubble in a test or a preview gets.
+  final VoidCallback? onOpenImage;
+
   /// Called from the message menu's delete item.
-  ///
-  /// Null hides the item, which is how a bubble that has no text to copy — a
-  /// file message, from M3 — will offer only what applies to it.
   final VoidCallback? onDelete;
 
   @override
@@ -44,21 +75,32 @@ class MessageBubble extends StatelessWidget {
     final bool mine = message.direction == MessageDirection.outgoing;
 
     final ColorScheme scheme = theme.colorScheme;
-    final Color background = mine
-        ? scheme.primaryContainer
-        : scheme.surfaceContainerHighest;
-    final Color foreground = mine
-        ? scheme.onPrimaryContainer
-        : scheme.onSurface;
+    final Color background =
+        mine ? scheme.primaryContainer : scheme.surfaceContainerHighest;
+    final Color foreground =
+        mine ? scheme.onPrimaryContainer : scheme.onSurface;
 
+    final Attachment? file = attachment;
     final String text = message.text ?? '';
+
+    // A picture whose bytes are here is drawn as a picture. Everything else —
+    // one still moving, one that failed, a document, a video — is the card,
+    // which has the name, the size, the state and the buttons for it.
+    final bool showImage = file != null && file.isImage && file.isOpenable;
+
+    // A bubble that is only a picture has no text to frame, so the padding it
+    // would otherwise have becomes a four-pixel border around the photo. With a
+    // caption, or with the card, the normal inset is what the text needs.
+    final bool pictureOnly = showImage && text.isEmpty;
+    final EdgeInsetsDirectional padding = pictureOnly
+        ? const EdgeInsetsDirectional.fromSTEB(4, 4, 4, 4)
+        : const EdgeInsetsDirectional.fromSTEB(12, 8, 12, 6);
 
     return Padding(
       padding: const EdgeInsetsDirectional.fromSTEB(12, 3, 12, 3),
       child: Row(
-        mainAxisAlignment: mine
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
+        mainAxisAlignment:
+            mine ? MainAxisAlignment.end : MainAxisAlignment.start,
         children: <Widget>[
           Flexible(
             child: ConstrainedBox(
@@ -84,19 +126,41 @@ class MessageBubble extends StatelessWidget {
                       bottomEnd: Radius.circular(mine ? 4 : 16),
                     ),
                   ),
-                  padding: const EdgeInsetsDirectional.fromSTEB(12, 8, 12, 6),
+                  padding: padding,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
-                      Text(
-                        text,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: foreground,
-                          height: 1.35,
+                      if (showImage)
+                        AttachmentImage(
+                          attachment: file,
+                          onTap: onOpenImage ?? () {},
+                        )
+                      else if (file != null)
+                        AttachmentCard(
+                          attachment: file,
+                          foreground: foreground,
+                          onOpen: onOpen,
+                          onSaveAs: onSaveAs,
+                          onCancel: onCancel,
+                          onAccept: onAccept,
+                          onDecline: onDecline,
                         ),
-                      ),
-                      const SizedBox(height: 3),
+                      if (text.isNotEmpty) ...<Widget>[
+                        // A caption under a photo needs the gap; a caption
+                        // under a card already has one from the card's own
+                        // buttons, and a second would read as a paragraph
+                        // break.
+                        if (showImage) const SizedBox(height: 6),
+                        Text(
+                          text,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: foreground,
+                            height: 1.35,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 4),
                       _Footer(
                         message: message,
                         mine: mine,
@@ -305,31 +369,31 @@ class _StatusIcon extends StatelessWidget {
 
     return switch (status) {
       MessageStatus.pending => Tooltip(
-        message: l10n.messageStatusPending,
-        child: Icon(Icons.schedule, size: 13, color: color),
-      ),
+          message: l10n.messageStatusPending,
+          child: Icon(Icons.schedule, size: 13, color: color),
+        ),
       MessageStatus.sent => Tooltip(
-        message: l10n.messageStatusSent,
-        child: Icon(Icons.check, size: 14, color: color),
-      ),
+          message: l10n.messageStatusSent,
+          child: Icon(Icons.check, size: 14, color: color),
+        ),
       MessageStatus.delivered => Tooltip(
-        message: l10n.messageStatusDelivered,
-        child: Icon(Icons.done_all, size: 14, color: color),
-      ),
+          message: l10n.messageStatusDelivered,
+          child: Icon(Icons.done_all, size: 14, color: color),
+        ),
       // The only state that asks for something. Tapping it is the whole retry
       // affordance — an icon a user can see and press, rather than a hidden
       // gesture on the bubble (§6.3).
       MessageStatus.failed => InkWell(
-        onTap: onRetry,
-        customBorder: const CircleBorder(),
-        child: Tooltip(
-          message: l10n.messageStatusFailed,
-          child: Padding(
-            padding: const EdgeInsets.all(2),
-            child: Icon(Icons.error_outline, size: 15, color: failedColor),
+          onTap: onRetry,
+          customBorder: const CircleBorder(),
+          child: Tooltip(
+            message: l10n.messageStatusFailed,
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(Icons.error_outline, size: 15, color: failedColor),
+            ),
           ),
         ),
-      ),
       MessageStatus.received => const SizedBox.shrink(),
     };
   }

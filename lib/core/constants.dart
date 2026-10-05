@@ -56,6 +56,9 @@ const int kProbeEveryRounds = 6;
 const int kStartBurstRounds = 3;
 const Duration kStartBurstGap = Duration(milliseconds: 400);
 
+/// No packet for this long → grey the peer out but keep the conversation readable.
+const Duration kPeerOfflineAfter = Duration(seconds: 15);
+
 /// How long *every* peer this device has heard from may stay silent before
 /// discovery stops waiting and rebuilds itself — the watchdog.
 ///
@@ -79,9 +82,6 @@ const Duration kStartBurstGap = Duration(milliseconds: 400);
 /// for — one rebuild, not one every second, and no second attempt until
 /// something is heard again.
 const Duration kSilentPeerRebindAfter = Duration(seconds: 20);
-
-/// No packet for this long → grey the peer out but keep the conversation readable.
-const Duration kPeerOfflineAfter = Duration(seconds: 15);
 
 /// No packet for this long → drop from the device list (the DB row survives).
 const Duration kPeerRemoveAfter = Duration(seconds: 60);
@@ -161,6 +161,64 @@ const int kMaxPayload = 512 * 1024;
 
 /// Simultaneous file transfers before new ones queue.
 const int kMaxConcurrentXfers = 3;
+
+/// Longest accepted `xferId`. Same shape as a device id and bounded for the
+/// same reason — it is an opaque identifier from the network, and nothing on
+/// the wire may be unbounded.
+const int kMaxXferIdLength = 64;
+
+/// Longest accepted file name in a `file_offer`.
+///
+/// Well past any real name, because [SafeName] truncates to what the file
+/// system will take anyway. This is the hostile-input bound: the name travels
+/// in the frame header, so without a cap one peer could put a megabyte there.
+const int kMaxFileNameLength = 512;
+
+/// Longest accepted MIME type. A type string is a few dozen characters; the
+/// headroom is for parameters (`text/plain; charset=utf-8`).
+const int kMaxMimeLength = 255;
+
+/// How long a `file_reject.reason` code may be. Codes, not sentences — see
+/// [RejectReason].
+const int kMaxRejectReasonLength = 32;
+
+/// How much file data to write between `flush()` calls — design.md §4.6.
+///
+/// The sender reads and writes one [kChunkSize] at a time, but the socket
+/// buffers what it is given and returns immediately. Without a periodic flush
+/// there is nothing pushing back on the read loop, and the whole file ends up
+/// resident in the socket's buffer: a 4 GB transfer, an OOM, and a crash at the
+/// worst possible moment. Flushing every 2 MB keeps at most a couple of
+/// megabytes in flight, because `flush()` does not return until the OS has taken
+/// them.
+const int kFileFlushBytes = 2 * 1024 * 1024;
+
+/// How long a `file_offer` waits for `file_accept` or `file_reject`.
+///
+/// Generous on purpose: the answer is a *person* deciding whether to accept a
+/// file, and the receiving UI asks them. A timeout short enough to feel snappy
+/// would be one that gives up while the dialog is still on screen. A minute is
+/// long enough for someone to read the file name, and short enough that a
+/// transfer to a device that has quietly gone away fails while the user still
+/// remembers starting it.
+const Duration kOfferTimeout = Duration(seconds: 60);
+
+/// How long a sender waits for the receiver's `file_done` after the last byte.
+///
+/// The receipt is the only thing that says the file was renamed into place
+/// rather than merely written to a socket, so it is worth waiting for — and the
+/// bytes are already sent, so what is being waited on is one frame on a
+/// connection that is already up.
+const Duration kTransferReceiptTimeout = Duration(seconds: 30);
+
+/// How much file data to move between writes of the `transfer` row.
+///
+/// Separate from [kFileFlushBytes] although both are 2 MB, because they bound
+/// different things: that one keeps the socket's buffer small, this one keeps
+/// the database quiet. A 1 GB file is 4096 chunks, and a row written per chunk
+/// would be four thousand transactions for a progress bar nobody reads that
+/// often.
+const int kTransferPersistBytes = 2 * 1024 * 1024;
 
 /// Announce datagrams must stay under the smallest common MTU to avoid IP
 /// fragmentation, which some APs handle badly. A device name + avatar that

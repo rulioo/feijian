@@ -30,6 +30,9 @@
       "port": { "type": "int" }
     }
   },
+  "discoveryFailedTitle": "Device discovery is not running",
+  "discoveryFailedBody": "This device could not open the port it listens on, so the list below cannot fill no matter who is on your network. Press Rescan to try again.",
+  "discoveryFailedDetail": "Details",
   "addDeviceByIp": "Add device by IP",
   "rescan": "Rescan",
   "sendFileAction": "Send a file",
@@ -110,6 +113,58 @@
     }
   },
   "historyCleared": "History cleared",
+
+  "fileSizeBytes": "{count, plural, =1{1 byte} other{{count} bytes}}",
+  "@fileSizeBytes": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "filePercent": "{percent}%",
+  "@filePercent": {
+    "placeholders": {
+      "percent": { "type": "int" }
+    }
+  },
+
+  "transferWaiting": "Waiting",
+  "transferAwaitingAnswer": "Waiting for your answer",
+  "transferDone": "Completed",
+  "transferFailed": "Failed",
+  "transferCancelled": "Cancelled",
+  "transferDeclined": "Declined",
+
+  "fileOpen": "Open",
+  "fileSaveAs": "Save as...",
+  "fileOpenFailed": "There is no app on this device that can open this file.",
+  "fileMissing": "The file is no longer on this device.",
+  "fileSaved": "Saved",
+  "fileSaveFailed": "The file could not be saved.",
+  "fileCancelled": "Transfer cancelled",
+
+  "fileSendFailed": "Could not send {file}.",
+  "@fileSendFailed": {
+    "placeholders": {
+      "file": { "type": "String" }
+    }
+  },
+  "fileTooManyTransfers": "Too many files are already moving. Wait for one to finish and try again.",
+  "fileFolderNotYet": "Sending a folder is not in this version yet. Send the files inside it instead.",
+  "fileDropToSend": "Drop to send",
+
+  "fileOfferTitle": "Incoming file",
+  "fileOfferBody": "{name} wants to send you {file} ({size})",
+  "@fileOfferBody": {
+    "placeholders": {
+      "name": { "type": "String" },
+      "file": { "type": "String" },
+      "size": { "type": "String" }
+    }
+  },
+  "fileAccept": "Accept",
+  "fileDecline": "Decline",
+  "fileActionResultAccept": "Accepted",
+  "fileActionResultDecline": "Declined",
 
   "peerInfoId": "Device ID",
   "peerInfoAddress": "Address",

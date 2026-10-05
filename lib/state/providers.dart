@@ -9,6 +9,7 @@ import '../core/discovery/network_interfaces.dart';
 import '../core/models/peer.dart';
 import '../platform/device_identity.dart';
 import '../platform/download_path.dart';
+import '../platform/file_chooser.dart';
 import 'settings_provider.dart';
 
 /// This device, as shown on the card at the top of the device list.
@@ -158,6 +159,16 @@ final FutureProvider<String> downloadPathProvider = FutureProvider<String>((
 ) {
   return DownloadPath.displayPath();
 });
+
+/// The operating system's file dialogs — design.md §6.3.
+///
+/// A provider so a widget test can hand the page a set of paths without a
+/// dialog. What the page does with them — one offer per file, a message for the
+/// one that failed, nothing for a folder — is the half worth testing, and it is
+/// unreachable while the real picker is in the way.
+final Provider<FileChooser> fileChooserProvider = Provider<FileChooser>(
+  (Ref ref) => const FileChooser(),
+);
 
 String _hostname() {
   try {

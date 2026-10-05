@@ -8,6 +8,7 @@ import 'ui/pages/devices_page.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/ui_constants.dart';
 import 'ui/widgets/discovery_lifecycle.dart';
+import 'ui/widgets/offer_listener.dart';
 
 class FeijianApp extends ConsumerWidget {
   const FeijianApp({super.key});
@@ -33,7 +34,9 @@ class FeijianApp extends ConsumerWidget {
             : Locale(settings.languageCode!),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: const HomeShell(),
+        // Inside the navigator, so an offer can put a dialog on screen from
+        // wherever the user happens to be (§9.2).
+        home: const OfferListener(child: HomeShell()),
       ),
     );
   }

@@ -1,18 +1,28 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:open_filex/open_filex.dart';
 
 import '../../core/constants.dart';
 import '../../core/models/message.dart';
 import '../../core/models/peer.dart';
+import '../../core/models/transfer.dart';
+import '../../core/protocol/payloads.dart';
+import '../../core/transfer/safe_name.dart';
 import '../../l10n/app_localizations.dart';
+import '../../platform/file_chooser.dart';
 import '../../state/chat_provider.dart';
 import '../../state/lan_provider.dart';
 import '../../state/lan_service.dart';
 import '../../state/providers.dart';
+import '../../state/transfer_provider.dart';
+import '../../state/transfer_service.dart';
 import '../theme/device_icons.dart';
+import '../widgets/drop_region.dart';
 import '../widgets/message_bubble.dart';
+import 'image_viewer_page.dart';
 
 /// The conversation view — design.md §6.3.
 ///
@@ -21,8 +31,12 @@ import '../widgets/message_bubble.dart';
 /// appends to the far end, which in a reversed list is the visual top — the one
 /// place growth does not move what the user is looking at.
 ///
-/// File bubbles, the drop overlay and the clipboard shortcuts are M3; the
-/// composer already has their buttons, and they say what they are waiting for.
+/// A file message draws as a card, a finished picture as a thumbnail that opens
+/// the fullscreen viewer (§6.3), and a transfer still moving as a bar over the
+/// same card. Files go out from the paperclip or by being dropped on the
+/// conversation, both of which end in [_offerFiles]. The folder button and the
+/// clipboard shortcuts are still to come, and both say so rather than doing
+/// nothing.
 class ChatPage extends ConsumerStatefulWidget {
   const ChatPage({super.key});
 
@@ -121,6 +135,110 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     }
   }
 
+  /// Asks the operating system for files and offers them here — §6.3.
+  ///
+  /// The `mounted` check is not about this widget being gone when the dialog
+  /// closes, though it can be. It is about [context]: the dialog is modal over
+  /// the whole app, and a device picked in the other pane while it was open
+  /// rebuilds this page — the paths that come back belong to whatever is on
+  /// screen when they arrive, and [_offerFiles] reads the peer from there.
+  Future<void> _attachFiles() async {
+    final List<String> paths = await ref.read(fileChooserProvider).pickFiles();
+    if (!mounted) {
+      return;
+    }
+    await _offerFiles(paths);
+  }
+
+  /// Offers each of [paths] to the open conversation, one transfer apiece.
+  ///
+  /// One offer per file rather than one transfer carrying many: §4.6's handshake
+  /// describes a single file — a name, a size, one answer — and saying "three of
+  /// these five are done" would need a batch's worth of states that nothing else
+  /// in the protocol has.
+  ///
+  /// The peer is read once, before the first offer. A user who switches
+  /// conversation halfway through a five-file drop is looking at a different
+  /// page, but the files were dropped on *this* one, and that is where they were
+  /// addressed.
+  ///
+  /// A file the engine refuses does not stop the ones after it: dropping a
+  /// folder and four files on the window should send the four.
+  Future<void> _offerFiles(List<String> paths) async {
+    final String? peerId = _peerId;
+    if (peerId == null || paths.isEmpty) {
+      return;
+    }
+
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      // The same sentence an unsent message gets. From here they are the same
+      // thing: nothing is listening on the network, so nothing can be offered.
+      _tell(AppLocalizations.of(context).sendUnavailable);
+      return;
+    }
+
+    for (final String path in paths) {
+      if (!mounted) {
+        return;
+      }
+      // Checked here rather than left to the engine's file-not-found, because a
+      // folder is something the user can see and did mean to send — "Could not
+      // send Photos" would be a worse answer than saying folders wait for a
+      // later version. A drop is the likeliest way to arrive with one.
+      if (FileSystemEntity.isDirectorySync(path)) {
+        _tell(AppLocalizations.of(context).fileFolderNotYet);
+        continue;
+      }
+
+      try {
+        await transfers.sendFile(peerId: peerId, file: File(path));
+      } on TransferException catch (error) {
+        if (!mounted) {
+          return;
+        }
+        final AppLocalizations l10n = AppLocalizations.of(context);
+        // `busy` is the engine's own ceiling on concurrent transfers, and it is
+        // about the app rather than about this file — naming the file would
+        // suggest the file is the problem and a second try would work.
+        _tell(
+          error.reason == RejectReason.busy
+              ? l10n.fileTooManyTransfers
+              : l10n.fileSendFailed(SafeName.fileName(path)),
+        );
+        debugPrint('[chat] offer failed for $path: $error');
+      }
+    }
+  }
+
+  /// Copies a finished file to wherever the user points — §6.3.
+  ///
+  /// Silence for a dialog the user closed: they know they closed it, and a toast
+  /// would be the app answering a question nobody asked. Absent entirely on
+  /// Android — see [FileChooser.canSaveAs], which is what decides whether the
+  /// button is offered at all.
+  Future<void> _saveAs(Attachment attachment) async {
+    final String? path = attachment.localPath;
+    if (path == null || !File(path).existsSync()) {
+      _tell(AppLocalizations.of(context).fileMissing);
+      return;
+    }
+
+    final FileChooser chooser = ref.read(fileChooserProvider);
+    final String? target = await chooser.pickSaveLocation(attachment.fileName);
+    if (target == null || !mounted) {
+      return;
+    }
+
+    final bool copied = await chooser.copy(path, target);
+    if (!mounted) {
+      return;
+    }
+    final AppLocalizations l10n = AppLocalizations.of(context);
+    _tell(copied ? l10n.fileSaved : l10n.fileSaveFailed);
+  }
+
   /// Asks for the next page of history, from outside the build phase.
   ///
   /// `loadOlder` moves the provider's state, and moving it while the list is
@@ -137,6 +255,195 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       }
       unawaited(ref.read(chatProvider(peerId).notifier).loadOlder());
     });
+  }
+
+  /// Hands a finished file to whatever this system opens it with — §6.3.
+  ///
+  /// The existence check is not redundant with the engine's error code. On
+  /// Windows the hand-off is a `cmd /c start`, which reports success as soon as
+  /// the shell accepts the name — so a file deleted from the Downloads folder
+  /// by hand would open nothing and say nothing, and the user would be left
+  /// pressing a button that does not appear to work.
+  Future<void> _openFile(Attachment attachment) async {
+    final String? path = attachment.localPath;
+    final AppLocalizations l10n = AppLocalizations.of(context);
+    if (path == null || !File(path).existsSync()) {
+      _tell(l10n.fileMissing);
+      return;
+    }
+
+    final OpenResult result = await OpenFilex.open(path);
+    if (result.type == ResultType.done || !mounted) {
+      return;
+    }
+    // `fileNotFound` is the file going away between the check and the call, or
+    // a platform that could not reach it — the same sentence either way.
+    // Everything else is the "nothing here opens this" case, which is the one
+    // the user can do something about.
+    _tell(
+      result.type == ResultType.fileNotFound
+          ? l10n.fileMissing
+          : l10n.fileOpenFailed,
+    );
+  }
+
+  /// Stops a transfer the user no longer wants — §4.6's cancellation rule.
+  ///
+  /// Silent when the engine is not up or the transfer has already ended: the
+  /// bubble is about to be rebuilt from the row either way, and a toast saying
+  /// "cancelled" over a card that still says "Completed" would be the lie.
+  Future<void> _cancelTransfer(Attachment attachment) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.cancelAttachment(attachment.id);
+    if (!mounted) {
+      return;
+    }
+    _tell(AppLocalizations.of(context).fileCancelled);
+  }
+
+  /// Agrees to an offer that is waiting in the conversation — §9.2.
+  ///
+  /// The same decision the dialog over the whole app asks for, reached the
+  /// other way round: a user who dismissed the dialog, or who opened the
+  /// conversation after it was asked, still has to be able to say yes.
+  Future<void> _acceptOffer(Attachment attachment) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.acceptAttachment(attachment.id);
+    if (mounted) {
+      _tell(AppLocalizations.of(context).fileActionResultAccept);
+    }
+  }
+
+  /// Turns one down. Refusing is a message to the sender, not a silence — it is
+  /// told which of the two happened, so its bubble can say so.
+  Future<void> _declineOffer(Attachment attachment) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.declineAttachment(attachment.id);
+    if (mounted) {
+      _tell(AppLocalizations.of(context).fileActionResultDecline);
+    }
+  }
+
+  /// Sends a file again after an attempt at it ended — §6.3's retry.
+  ///
+  /// Deliberately *not* the call a text message's retry makes.
+  /// [ChatController.retry] puts the message back in the outbox, and the outbox
+  /// is text-only ([MessageDao.pendingFor] says why) — a file requeued there
+  /// would sit at `pending` with nothing able to send it, which is what the
+  /// exclamation did before this existed. A file's retry is a new offer, so it
+  /// goes to the engine.
+  ///
+  /// **Which endings get one.** Anything that is not a success: failed, and also
+  /// cancelled and declined, which the database records as a failed *message*
+  /// too (§4.5 has no third word for it) and which therefore draw the same
+  /// exclamation. Both are reasonable things to want again — the user stopped a
+  /// transfer because the network or the moment was wrong, or the peer said no
+  /// and has since changed their mind. Tapping the icon is a new decision, and
+  /// the engine answers it with a new attempt.
+  ///
+  /// A refresh afterwards because the engine writes the *message* row back to
+  /// `pending`, and the footer's icon is drawn from that row. Without the re-read
+  /// the bubble would show a progress bar climbing under a red exclamation — and
+  /// a second tap on it would start a second transfer of the same file, which the
+  /// engine's own ceiling would then refuse.
+  Future<void> _retryTransfer(Attachment attachment) async {
+    final String? peerId = _peerId;
+    if (peerId == null) {
+      return;
+    }
+
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      // The same sentence an unsent message gets, for the same reason: nothing
+      // is listening on the network, so nothing can be offered.
+      _tell(AppLocalizations.of(context).sendUnavailable);
+      return;
+    }
+
+    try {
+      await transfers.retryAttachment(
+        peerId: peerId,
+        attachmentId: attachment.id,
+      );
+    } on TransferException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      final AppLocalizations l10n = AppLocalizations.of(context);
+      _tell(switch (error.reason) {
+        RejectReason.busy => l10n.fileTooManyTransfers,
+        // The file behind the card is gone or is no longer the file that was
+        // offered. §5.2 asks for that to be said in its own words rather than
+        // as a failure of the transfer.
+        RejectReason.notFound => l10n.fileMissing,
+        _ => l10n.fileSendFailed(attachment.fileName),
+      });
+      debugPrint('[chat] retry failed for ${attachment.id}: $error');
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+    await ref.read(chatProvider(peerId).notifier).refresh();
+  }
+
+  /// Opens the conversation's pictures at the one that was tapped.
+  ///
+  /// Given every picture rather than the one tapped, because §6.3 asks the
+  /// viewer to swipe between them; [pictures] is the same list for every bubble
+  /// on the page, built once per build rather than once per tap.
+  Future<void> _openImage(List<Attachment> pictures, Attachment tapped) async {
+    final int index = pictures.indexWhere((Attachment a) => a.id == tapped.id);
+    if (index < 0) {
+      return;
+    }
+    await Navigator.of(context).push(
+      ImageViewerPage.route(images: pictures, initialIndex: index),
+    );
+  }
+
+  /// The conversation's pictures, oldest first — the order the chat shows them
+  /// in, so a swipe moves the way the list scrolls.
+  ///
+  /// Only the ones whose bytes are here and that this app can decode: an image
+  /// still arriving is a card, and putting it in the viewer would give the user
+  /// a blank page to swipe onto. `Attachment.isImage` is the same test the
+  /// bubble makes, which is what keeps the two lists the same list.
+  static List<Attachment> _picturesIn(ChatState state) {
+    final List<Attachment> pictures = <Attachment>[];
+    for (final Message message in state.messages) {
+      final Attachment? file = state.attachments[message.id];
+      if (file != null && file.isImage && file.isOpenable) {
+        pictures.add(file);
+      }
+    }
+    return pictures;
+  }
+
+  void _tell(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
   }
 
   /// The selected peer as it is *now*.
@@ -338,8 +645,8 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               l10n.chatEmptyNoPeer,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
             ),
           ),
         ),
@@ -365,57 +672,70 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     // be a worse lie than no item at all.
     final bool isManual = ref.watch(manualPeerIdsProvider).contains(peer.id);
 
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: _ChatHeader(peer: peer, online: reachable),
-        actions: <Widget>[
-          PopupMenuButton<String>(
-            tooltip: l10n.moreActions,
-            onSelected: (String value) => switch (value) {
-              'info' => unawaited(_showPeerInfo(peer)),
-              'clear' => unawaited(_confirmClearHistory(peer)),
-              'remove' => unawaited(_confirmRemoveDevice(peer)),
-              _ => _showNotImplemented(context),
-            },
-            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-              PopupMenuItem<String>(
-                value: 'info',
-                child: Text(l10n.viewPeerInfo),
-              ),
-              PopupMenuItem<String>(
-                value: 'clear',
-                child: Text(l10n.clearHistory),
-              ),
-              if (isManual) ...<PopupMenuEntry<String>>[
-                // Set apart because it is the only item here that acts on the
-                // device rather than on the conversation, and the one item of
-                // the three that cannot be undone by sending another message.
-                const PopupMenuDivider(),
+    // Around the Scaffold rather than inside the body, so the drop covers the
+    // composer as well: a file dropped on the message field is a file dropped on
+    // the conversation, and the region that stopped at the list would say
+    // otherwise for the bottom hundred pixels of the page.
+    return DropRegion(
+      onFiles: (List<String> paths) => unawaited(_offerFiles(paths)),
+      child: Scaffold(
+        appBar: AppBar(
+          titleSpacing: 0,
+          title: _ChatHeader(peer: peer, online: reachable),
+          actions: <Widget>[
+            PopupMenuButton<String>(
+              tooltip: l10n.moreActions,
+              onSelected: (String value) => switch (value) {
+                'info' => unawaited(_showPeerInfo(peer)),
+                'clear' => unawaited(_confirmClearHistory(peer)),
+                'remove' => unawaited(_confirmRemoveDevice(peer)),
+                _ => _showNotImplemented(context),
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
                 PopupMenuItem<String>(
-                  value: 'remove',
-                  child: Text(
-                    l10n.removeDevice,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
+                  value: 'info',
+                  child: Text(l10n.viewPeerInfo),
                 ),
+                PopupMenuItem<String>(
+                  value: 'clear',
+                  child: Text(l10n.clearHistory),
+                ),
+                if (isManual) ...<PopupMenuEntry<String>>[
+                  // Set apart because it is the only item here that acts on the
+                  // device rather than on the conversation, and the one item of
+                  // the three that cannot be undone by sending another message.
+                  const PopupMenuDivider(),
+                  PopupMenuItem<String>(
+                    value: 'remove',
+                    child: Text(
+                      l10n.removeDevice,
+                      style:
+                          TextStyle(color: Theme.of(context).colorScheme.error),
+                    ),
+                  ),
+                ],
               ],
-            ],
-          ),
-          const SizedBox(width: 4),
-        ],
-      ),
-      body: Column(
-        children: <Widget>[
-          if (!reachable) _OfflineBanner(name: peer.name),
-          Expanded(child: _history(peer, history)),
-          _Composer(
-            controller: _composer,
-            onChanged: (String value) =>
-                ref.read(chatProvider(peer.id).notifier).setDraft(value),
-            onSend: () => unawaited(_send()),
-          ),
-        ],
+            ),
+            const SizedBox(width: 4),
+          ],
+        ),
+        body: Column(
+          children: <Widget>[
+            if (!reachable) _OfflineBanner(name: peer.name),
+            Expanded(child: _history(peer, history)),
+            _Composer(
+              controller: _composer,
+              onChanged: (String value) =>
+                  ref.read(chatProvider(peer.id).notifier).setDraft(value),
+              onSend: () => unawaited(_send()),
+              onAttachFile: () => unawaited(_attachFiles()),
+              // Says what is missing rather than opening a picker that then
+              // refuses. Sending a whole folder is M4 — §4.6's `relPath` field is
+              // the part of the protocol it needs, and it is not implemented.
+              onAttachFolder: () => _tell(l10n.fileFolderNotYet),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -424,9 +744,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     return switch (history) {
       AsyncData<ChatState>(:final ChatState value) => _messageList(peer, value),
       AsyncError<ChatState>(:final Object error) => _HistoryFailure(
-        onRetry: () => ref.invalidate(chatProvider(peer.id)),
-        error: error,
-      ),
+          onRetry: () => ref.invalidate(chatProvider(peer.id)),
+          error: error,
+        ),
       _ => const Center(child: CircularProgressIndicator()),
     };
   }
@@ -435,6 +755,16 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     if (state.messages.isEmpty) {
       return _EmptyHistory(name: peer.name);
     }
+
+    // Built once for the page, not per bubble: every picture bubble hands the
+    // viewer the same run of them, and rebuilding it fifty times per frame to
+    // hand back the same list would be work for nothing.
+    final List<Attachment> pictures = _picturesIn(state);
+
+    // A property of the platform, so it is asked once rather than per bubble —
+    // and asked of the chooser, because the answer is why Save as is missing on
+    // Android rather than a second opinion formed here.
+    final bool canSaveAs = ref.read(fileChooserProvider).canSaveAs;
 
     return NotificationListener<ScrollNotification>(
       onNotification: (ScrollNotification notification) {
@@ -461,15 +791,61 @@ class _ChatPageState extends ConsumerState<ChatPage> {
           // Reversed: index 0 is the newest, at the bottom.
           final Message message =
               state.messages[state.messages.length - 1 - index];
+          final Attachment? file = state.attachments[message.id];
+          // An offer this device has been sent and has not answered. The
+          // direction is the message's, not the attachment's: §5.1 gives an
+          // attachment no direction of its own, and both ends of a transfer
+          // write the same shape of row.
+          final bool answering = file != null &&
+              message.direction == MessageDirection.incoming &&
+              file.state == TransferState.offered;
+          // §6.3's exclamation is one affordance over two kinds of message. A
+          // file's retry cannot go through the message's — that one requeues the
+          // row for the outbox, which is text-only — so the branch is here,
+          // keyed on the rows rather than on the card's buttons: cancelled and
+          // declined are failed *messages* too, and the engine is the thing that
+          // knows what to do with all three.
+          final VoidCallback onRetry = file != null &&
+                  message.status == MessageStatus.failed
+              ? () => unawaited(_retryTransfer(file))
+              : () => unawaited(
+                    ref.read(chatProvider(peer.id).notifier).retry(message.id),
+                  );
           return MessageBubble(
             key: ValueKey<String>(message.id),
             message: message,
-            onRetry: () => unawaited(
-              ref.read(chatProvider(peer.id).notifier).retry(message.id),
-            ),
+            attachment: file,
+            onRetry: onRetry,
             onDelete: () => unawaited(
-              ref.read(chatProvider(peer.id).notifier).deleteMessage(message.id),
+              ref
+                  .read(chatProvider(peer.id).notifier)
+                  .deleteMessage(message.id),
             ),
+            // Only once the bytes are here. The card offers whatever it is
+            // given, and Open on a file that is half arrived is a button that
+            // opens half a file.
+            onOpen: file == null || !file.isOpenable
+                ? null
+                : () => unawaited(_openFile(file)),
+            // The same condition as Open, plus the platform's answer: copying a
+            // file out needs a system dialog, and a button that did nothing when
+            // pressed would be worse than one that is not there.
+            onSaveAs: file == null || !file.isOpenable || !canSaveAs
+                ? null
+                : () => unawaited(_saveAs(file)),
+            // Offered while there is something to stop. A file that is here, or
+            // that never will be, has no transfer left to cancel, and the button
+            // would be a promise the service cannot keep. An unanswered offer is
+            // the third case: it has something to stop, but "Cancel" and
+            // "Decline" would be two words for one decision.
+            onCancel: file == null || file.isFinished || answering
+                ? null
+                : () => unawaited(_cancelTransfer(file)),
+            onAccept: answering ? () => unawaited(_acceptOffer(file)) : null,
+            onDecline: answering ? () => unawaited(_declineOffer(file)) : null,
+            onOpenImage: file == null
+                ? null
+                : () => unawaited(_openImage(pictures, file)),
           );
         },
       ),
@@ -699,11 +1075,15 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.onChanged,
     required this.onSend,
+    required this.onAttachFile,
+    required this.onAttachFolder,
   });
 
   final TextEditingController controller;
   final ValueChanged<String> onChanged;
   final VoidCallback onSend;
+  final VoidCallback onAttachFile;
+  final VoidCallback onAttachFolder;
 
   @override
   Widget build(BuildContext context) {
@@ -712,7 +1092,8 @@ class _Composer extends StatelessWidget {
 
     return Container(
       decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant)),
+        border:
+            Border(top: BorderSide(color: theme.colorScheme.outlineVariant)),
       ),
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       child: SafeArea(
@@ -723,12 +1104,12 @@ class _Composer extends StatelessWidget {
             IconButton(
               icon: const Icon(Icons.attach_file),
               tooltip: l10n.attachFile,
-              onPressed: () => _showNotImplemented(context),
+              onPressed: onAttachFile,
             ),
             IconButton(
               icon: const Icon(Icons.create_new_folder_outlined),
               tooltip: l10n.attachFolder,
-              onPressed: () => _showNotImplemented(context),
+              onPressed: onAttachFolder,
             ),
             const SizedBox(width: 4),
             Expanded(
@@ -765,6 +1146,8 @@ class _Composer extends StatelessWidget {
   }
 }
 
+/// Says a menu item is not built yet — the peer-info sheet's remaining rows, and
+/// whatever the next one to be added here leaves unfinished.
 void _showNotImplemented(BuildContext context) {
   final AppLocalizations l10n = AppLocalizations.of(context);
   ScaffoldMessenger.of(context).showSnackBar(

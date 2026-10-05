@@ -77,8 +77,7 @@ class ChatRepository {
   }
 
   Future<int> unreadCount(String peerId) async {
-    final ConversationRow? row =
-        await _messages.conversationFor(peerId);
+    final ConversationRow? row = await _messages.conversationFor(peerId);
     return row?.unreadCount ?? 0;
   }
 
@@ -156,7 +155,7 @@ class ChatRepository {
     await _db.transaction(() async {
       final ConversationRow conversation =
           await _messages.ensureConversation(peerId, now: at);
-      created = _orderedAt(conversation, at);
+      created = _messages.nextCreatedAt(conversation, at);
       await _messages.insertMessage(MessagesCompanion.insert(
         id: msgId,
         conversationId: conversation.id,
@@ -202,7 +201,7 @@ class ChatRepository {
     return _db.transaction(() async {
       final ConversationRow conversation =
           await _messages.ensureConversation(peerId, now: at);
-      final int created = _orderedAt(conversation, at);
+      final int created = _messages.nextCreatedAt(conversation, at);
       final bool isNew = await _messages.insertMessage(MessagesCompanion.insert(
         id: msgId,
         conversationId: conversation.id,
@@ -222,45 +221,6 @@ class ChatRepository {
       }
       return isNew;
     });
-  }
-
-  /// The `created_at` a new message in [conversation] gets: [at], pushed past
-  /// the newest timestamp the conversation already holds.
-  ///
-  /// Without this, two messages written in the same millisecond have **no
-  /// defined order**. `created_at` is a millisecond, and both orderings that
-  /// read it break the tie on `id` — a random v4 UUID. So `pendingFor` sent a
-  /// queue in a different order each run, and `page` displayed whatever order
-  /// the UUIDs happened to compare in. That is not theoretical: the §5.2 test
-  /// for flush order failed about one run in six, with the three messages
-  /// arriving in a different order each time, and the flush is the worst case
-  /// rather than a rare one — a queue that comes out all at once writes three
-  /// messages inside a single millisecond. On the receiving side the same
-  /// collision happens whenever a burst arrives, since an incoming message is
-  /// stamped with the *receiver's* clock (§4.5).
-  ///
-  /// The fix belongs here rather than in the two `order by` clauses because the
-  /// orderings are also used as keyset cursors (see [MessageDao.page]), where a
-  /// tiebreaker has to be a value the caller can carry — and a monotonic
-  /// timestamp keeps every existing query and cursor correct as they are.
-  ///
-  /// [conversation.lastMsgAt] is the previous maximum: [MessageDao.bumpConversation]
-  /// only ever moves it forward and every insert passes its own timestamp, so it
-  /// is the maximum over the conversation's messages, and reading it costs a
-  /// primary-key lookup rather than a scan.
-  ///
-  /// Both callers run this inside the transaction that does the insert. That is
-  /// load-bearing: it is what stops two concurrent writes from reading the same
-  /// maximum and colliding again. Drift serializes transactions, so the second
-  /// one sees the first one's commit.
-  ///
-  /// The timestamp can therefore run slightly ahead of the wall clock — by one
-  /// millisecond per message in a burst. That is the standard trade a chat log
-  /// makes, and it is bounded by the burst size: it cannot drift without
-  /// messages to justify it.
-  int _orderedAt(ConversationRow conversation, int at) {
-    final int? newest = conversation.lastMsgAt;
-    return newest == null || at > newest ? at : newest + 1;
   }
 
   /// Moves a message along its delivery state machine (§4.5).

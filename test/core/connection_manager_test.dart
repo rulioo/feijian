@@ -1,8 +1,11 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:feijian/core/protocol/frame_codec.dart';
 import 'package:feijian/core/protocol/payloads.dart';
 import 'package:feijian/core/transport/connection_manager.dart';
 import 'package:feijian/core/transport/connection_state.dart';
+import 'package:feijian/core/transport/control_connection.dart';
 import 'package:feijian/core/transport/feijian_server.dart';
 import 'package:feijian/core/transport/transport_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,13 +17,24 @@ const String kIdB = 'device-bbb';
 
 late List<String> logs;
 
-ConnectionManager managerFor(String deviceId) {
-  return ConnectionManager(
-    selfHello: helloFor(deviceId),
-    port: 0,
+/// A started manager, already listening.
+///
+/// The port is reserved first and then announced, rather than binding port 0
+/// and announcing the default. The two have to agree: a peer that answers a
+/// dial teaches us where it listens from its `hello`, so a manager advertising
+/// 24250 while bound to an ephemeral port would have every later dial — a
+/// reconnect, or a data connection — aimed at whatever happens to hold 24250
+/// on the machine, which on a developer's box is the real app.
+Future<ConnectionManager> managerFor(String deviceId) async {
+  final int port = await freePort();
+  final ConnectionManager manager = ConnectionManager(
+    selfHello: helloFor(deviceId, port: port),
+    port: port,
     tuning: testTuning,
     onLog: logs.add,
   );
+  await manager.start();
+  return manager;
 }
 
 MessagePayload message(String msgId, [String text = 'hi']) => MessagePayload(
@@ -53,9 +67,7 @@ class Peers {
 /// Starts two managers and connects them. [dialBothWays] makes both dial at the
 /// same moment, which is the race §4.4 exists to resolve.
 Future<Peers> connectedPeers({bool dialBothWays = false}) async {
-  final Peers peers = Peers(managerFor(kIdA), managerFor(kIdB));
-  await peers.a.start();
-  await peers.b.start();
+  final Peers peers = Peers(await managerFor(kIdA), await managerFor(kIdB));
 
   peers.a.incoming.listen(peers.toA.add);
   peers.b.incoming.listen(peers.toB.add);
@@ -93,7 +105,8 @@ void main() {
       addTearDown(peers.dispose);
 
       expect(peers.a.sendMessage(kIdB, message('m1', '你好 world 🎉')), isTrue);
-      await waitUntil(() => peers.toB.isNotEmpty, describe: 'the message to arrive');
+      await waitUntil(() => peers.toB.isNotEmpty,
+          describe: 'the message to arrive');
 
       expect(peers.toB.single.payload.msgId, 'm1');
       // Non-ASCII survives the round trip: the frame header is JSON, and this
@@ -114,37 +127,38 @@ void main() {
       addTearDown(peers.dispose);
 
       expect(peers.b.sendMessage(kIdA, message('reply')), isTrue);
-      await waitUntil(() => peers.toA.isNotEmpty, describe: 'the reply to arrive');
+      await waitUntil(() => peers.toA.isNotEmpty,
+          describe: 'the reply to arrive');
       expect(peers.toA.single.peerId, kIdB);
     });
 
-    test('a peer that dialled us is reachable without us dialling it', () async {
+    test('a peer that dialled us is reachable without us dialling it',
+        () async {
       // Half of all conversations start this way: the other side clicks first.
-      final ConnectionManager a = managerFor(kIdA);
-      final ConnectionManager b = managerFor(kIdB);
+      final ConnectionManager a = await managerFor(kIdA);
+      final ConnectionManager b = await managerFor(kIdB);
       addTearDown(() async {
         await a.dispose();
         await b.dispose();
       });
-      await a.start();
-      await b.start();
 
       a.requireConnection(
         kIdB,
         address: InternetAddress.loopbackIPv4,
         port: b.boundPort!,
       );
-      await waitUntil(() => b.isConnected(kIdA), describe: 'b to accept the dial');
+      await waitUntil(() => b.isConnected(kIdA),
+          describe: 'b to accept the dial');
 
       // b never called requireConnection, so it has to have learned where a is
       // from the connection itself.
       expect(b.sendMessage(kIdA, message('unsolicited reply')), isTrue);
     });
 
-    test('sending with no connection reports failure instead of queueing', () async {
-      final ConnectionManager a = managerFor(kIdA);
+    test('sending with no connection reports failure instead of queueing',
+        () async {
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
       // The message stays the caller's: the pool deliberately does not hold a
       // queue, because the durable copy of it is a database row, not a frame.
@@ -183,7 +197,8 @@ void main() {
       expect(peers.a.pendingAckCount, 0, reason: 'nothing left pending');
     });
 
-    test('an ack that arrives after giving up still counts as delivered', () async {
+    test('an ack that arrives after giving up still counts as delivered',
+        () async {
       // The message did arrive; only the ack was slow. Showing a permanent ⚠ for
       // it would be a lie the user could see.
       final Peers peers = await connectedPeers();
@@ -264,14 +279,12 @@ void main() {
       // Two installs sharing a device id — a restored backup, a cloned config —
       // must not connect to each other: the peer id is the dedupe key, so a
       // self-connection would make every rule keyed on it ambiguous.
-      final ConnectionManager a = managerFor(kIdA);
-      final ConnectionManager twin = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
+      final ConnectionManager twin = await managerFor(kIdA);
       addTearDown(() async {
         await a.dispose();
         await twin.dispose();
       });
-      await a.start();
-      await twin.start();
 
       a.requireConnection(
         kIdA,
@@ -291,18 +304,20 @@ void main() {
       // looks like. The pool must keep trying rather than giving up at the first
       // refusal.
       final int port = await freePort();
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
-      a.requireConnection(kIdB, address: InternetAddress.loopbackIPv4, port: port);
+      a.requireConnection(kIdB,
+          address: InternetAddress.loopbackIPv4, port: port);
       await waitUntil(
         () => logs.any((String l) => l.contains('could not reach')),
         describe: 'the first attempt to fail',
       );
 
       final FeijianServer late = FeijianServer(
-        selfHello: helloFor(kIdB),
+        // The announced port has to be the listening one, or the reconnect
+        // after the first refusal would go somewhere else entirely.
+        selfHello: helloFor(kIdB, port: port),
         port: port,
         tuning: testTuning,
       );
@@ -328,9 +343,10 @@ void main() {
       );
 
       // b comes back on a different port, as a fresh bind would give it.
+      final int newPort = await freePort();
       final FeijianServer restarted = FeijianServer(
-        selfHello: helloFor(kIdB),
-        port: 0,
+        selfHello: helloFor(kIdB, port: newPort),
+        port: newPort,
         tuning: testTuning,
       );
       await restarted.start();
@@ -393,11 +409,11 @@ void main() {
 
     test('releasing a peer stops the retry loop', () async {
       final int port = await freePort();
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
-      a.requireConnection(kIdB, address: InternetAddress.loopbackIPv4, port: port);
+      a.requireConnection(kIdB,
+          address: InternetAddress.loopbackIPv4, port: port);
       await waitUntil(
         () => logs.any((String l) => l.contains('retrying')),
         describe: 'the retry loop to start',
@@ -416,13 +432,12 @@ void main() {
   });
 
   group('Add by IP (design.md §4.1)', () {
-    test('reaches a device that never announced, and returns what it is', () async {
-      final ConnectionManager a = managerFor(kIdA);
-      final ConnectionManager b = managerFor(kIdB);
+    test('reaches a device that never announced, and returns what it is',
+        () async {
+      final ConnectionManager a = await managerFor(kIdA);
+      final ConnectionManager b = await managerFor(kIdB);
       addTearDown(a.dispose);
       addTearDown(b.dispose);
-      await a.start();
-      await b.start();
 
       // No discovery, no announce, no prior knowledge of the id — which is the
       // whole point: behind AP isolation this is the only way to learn it.
@@ -445,9 +460,8 @@ void main() {
 
     test('reports nothing answered when no one is listening', () async {
       final int port = await freePort();
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
       final DialResult result =
           await a.connectToAddress(InternetAddress.loopbackIPv4, port: port);
@@ -458,9 +472,8 @@ void main() {
     });
 
     test('reports this device when the address is our own', () async {
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
       // Reachable, and not a peer: a user who mistyped their own address out of
       // the list needs to hear that, not "nothing answered".
@@ -473,7 +486,8 @@ void main() {
       expect(result.problem, DialProblem.thisDevice);
     });
 
-    test('a peer that hangs up during the handshake reports unreachable', () async {
+    test('a peer that hangs up during the handshake reports unreachable',
+        () async {
       // A raw listener that accepts the socket and then drops it, without ever
       // sending a `hello`. The dial gets a connection and no peer out of it, and
       // the advice for the user is the same as for a port with nothing on it.
@@ -484,9 +498,8 @@ void main() {
       addTearDown(rude.close);
       rude.listen((Socket socket) => socket.destroy());
 
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
 
       final DialResult result = await a.connectToAddress(
         InternetAddress.loopbackIPv4,
@@ -524,7 +537,6 @@ void main() {
         onLog: logs.add,
       );
       addTearDown(a.dispose);
-      await a.start();
 
       final DialResult result = await a.connectToAddress(
         InternetAddress.loopbackIPv4,
@@ -536,7 +548,8 @@ void main() {
       expect(result.problem, DialProblem.unreachable);
     });
 
-    test('a dial to a peer we are already connected to is not a failure', () async {
+    test('a dial to a peer we are already connected to is not a failure',
+        () async {
       final Peers peers = await connectedPeers();
       addTearDown(peers.dispose);
 
@@ -555,8 +568,277 @@ void main() {
     });
   });
 
+  group('data connections (design.md §4.4)', () {
+    /// Dials [manager] the way a peer opening a data connection does: a
+    /// `role: data` hello naming the transfer, or naming nothing when [xferId]
+    /// is null.
+    Future<ControlConnection> dialData(
+      ConnectionManager manager, {
+      String deviceId = kIdB,
+      String? xferId = 'xfer-1',
+    }) {
+      return ControlConnection.connect(
+        address: InternetAddress.loopbackIPv4,
+        port: manager.boundPort!,
+        selfHello: helloFor(
+          deviceId,
+          role: ConnectionRole.data,
+          xferId: xferId,
+        ),
+        tuning: testTuning,
+      );
+    }
+
+    test('an accepted data connection is handed over, frames and all',
+        () async {
+      final ConnectionManager a = await managerFor(kIdA);
+      addTearDown(a.dispose);
+
+      final List<DataConnection> received = <DataConnection>[];
+      a.dataConnections.listen(received.add);
+
+      final ControlConnection dialled = await dialData(a, xferId: 'xfer-7');
+      addTearDown(dialled.close);
+      await waitUntil(
+        () => received.isNotEmpty,
+        describe: 'the data connection to be routed',
+      );
+
+      expect(received.single.peerId, kIdB);
+      expect(received.single.xferId, 'xfer-7');
+
+      // The whole point of routing: the frames are still there. A pool that
+      // had read them first would have left its owner with a silent socket.
+      final List<Frame> frames = <Frame>[];
+      received.single.connection.frames.listen(frames.add);
+      expect(
+        dialled.send(
+          Frame.of(
+            FrameType.fileData,
+            <String, Object?>{'xferId': 'xfer-7', 'offset': 0},
+            Uint8List.fromList(<int>[1, 2, 3]),
+          ),
+        ),
+        isTrue,
+      );
+      await waitUntil(() => frames.isNotEmpty, describe: 'the chunk to arrive');
+      expect(frames.single.payload, <int>[1, 2, 3]);
+
+      // And the peer was never filed as a chat peer: the client of a data
+      // socket is a transfer, not a conversation.
+      expect(a.connectedPeers, isEmpty);
+    });
+
+    test('a data connection naming no transfer is closed', () async {
+      // With `kMaxConcurrentXfers` transfers able to run at once, there is
+      // nothing to infer the transfer from — and a socket nobody can claim is a
+      // socket nobody will ever close.
+      final ConnectionManager a = await managerFor(kIdA);
+      addTearDown(a.dispose);
+
+      final List<DataConnection> received = <DataConnection>[];
+      a.dataConnections.listen(received.add);
+
+      final ControlConnection dialled = await dialData(a, xferId: null);
+      addTearDown(dialled.close);
+
+      expect(await waitForClosed(dialled), ConnectionClosedReason.remoteBye);
+      expect(received, isEmpty);
+      expect(
+        logs.any((String l) => l.contains('unattributed data connection')),
+        isTrue,
+        reason: 'the log has to say why it was refused: $logs',
+      );
+    });
+
+    test('with no transfer layer listening, a data connection is refused',
+        () async {
+      // A data connection arrives without anyone asking for it, so the
+      // alternative is holding a socket and a heartbeat for a layer that does
+      // not exist.
+      final ConnectionManager a = await managerFor(kIdA);
+      addTearDown(a.dispose);
+
+      final ControlConnection dialled = await dialData(a);
+      addTearDown(dialled.close);
+
+      expect(await waitForClosed(dialled), ConnectionClosedReason.remoteBye);
+      expect(
+        logs.any((String l) => l.contains('no transfer layer is listening')),
+        isTrue,
+        reason: 'the log has to say why it was refused: $logs',
+      );
+    });
+
+    test('connectData opens a second socket that the peer routes as data',
+        () async {
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      final List<DataConnection> atB = <DataConnection>[];
+      peers.b.dataConnections.listen(atB.add);
+
+      final ControlConnection? data =
+          await peers.a.connectData(kIdB, xferId: 'xfer-9');
+      expect(data, isNotNull);
+      addTearDown(() => data!.close());
+
+      // Both hellos say what the socket is for, which is what lets b attribute
+      // it before reading a byte of file data.
+      expect(data!.peerHello!.role, ConnectionRole.data);
+      expect(data.peerHello!.xferId, 'xfer-9');
+
+      await waitUntil(
+        () => atB.isNotEmpty,
+        describe: 'b to route the data connection',
+      );
+      expect(atB.single.peerId, kIdA);
+      expect(atB.single.xferId, 'xfer-9');
+
+      // The conversation is untouched — that is the point of a second socket.
+      expect(peers.a.isConnected(kIdB), isTrue);
+      expect(peers.lostAtA, isEmpty);
+      expect(peers.lostAtB, isEmpty);
+    });
+
+    test('the handshake frames travel on the control connection', () async {
+      // `file_offer` and its answers have to go over the control connection:
+      // the data connection does not exist until the offer has been accepted
+      // (design.md §4.6).
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      final List<IncomingTransferFrame> atB = <IncomingTransferFrame>[];
+      peers.b.transferFrames.listen(atB.add);
+
+      expect(
+        peers.a.sendTransfer(
+          kIdB,
+          const FileOfferPayload(
+            xferId: 'xfer-1',
+            name: 'holiday.jpg',
+            totalSize: 4096,
+          ).toFrame(),
+        ),
+        isTrue,
+      );
+      await waitUntil(() => atB.isNotEmpty, describe: 'the offer to arrive');
+
+      expect(atB.single.peerId, kIdA);
+      expect(atB.single.frame.type, FrameType.fileOffer);
+      expect(FileOfferPayload.from(atB.single.frame).value!.xferId, 'xfer-1');
+      // It is not chat: nothing about an offer reaches the message stream.
+      expect(peers.toB, isEmpty);
+    });
+
+    test('file_data on the control connection is refused, not written',
+        () async {
+      // A peer that lost track of which socket it was writing to. There is
+      // nothing on this connection to write the bytes into, and the transfer it
+      // belongs to is not here to be told.
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      final List<IncomingTransferFrame> atB = <IncomingTransferFrame>[];
+      peers.b.transferFrames.listen(atB.add);
+
+      expect(
+        peers.a.sendTransfer(
+          kIdB,
+          Frame.of(
+            FrameType.fileData,
+            <String, Object?>{'xferId': 'xfer-1', 'offset': 0},
+            Uint8List.fromList(<int>[1, 2, 3]),
+          ),
+        ),
+        isTrue,
+      );
+      await waitUntil(
+        () => logs.any((String l) => l.contains('file_data on the control')),
+        describe: 'the stray chunk to be reported',
+      );
+      expect(atB, isEmpty);
+    });
+
+    test('connectData to a peer we have never located returns null', () async {
+      final ConnectionManager a = await managerFor(kIdA);
+      addTearDown(a.dispose);
+
+      expect(await a.connectData('device-nobody', xferId: 'xfer-1'), isNull);
+    });
+
+    test('connectData gives up on a peer that is no longer listening',
+        () async {
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      // The port is remembered from the control connection, so this dials a
+      // real address with nothing behind it.
+      await peers.b.stop();
+
+      expect(await peers.a.connectData(kIdB, xferId: 'xfer-1'), isNull);
+    });
+
+    test('a data connection ending is not the peer going offline', () async {
+      // The ordinary end of a finished transfer must not look like a lost peer:
+      // that would drain the offline queue at a peer which is right there, and
+      // would grey out a device that is still online.
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      final List<DataConnection> atB = <DataConnection>[];
+      peers.b.dataConnections.listen(atB.add);
+
+      final ControlConnection? data =
+          await peers.a.connectData(kIdB, xferId: 'xfer-9');
+      await waitUntil(
+        () => atB.isNotEmpty,
+        describe: 'b to route the data connection',
+      );
+
+      await data!.close();
+
+      // Wait for whichever outcome b reaches, then assert which one it was.
+      await waitUntil(
+        () =>
+            logs.any((String l) => l.contains('data connection closed')) ||
+            peers.lostAtB.isNotEmpty,
+        describe: 'b to notice the data connection ended',
+      );
+      expect(peers.lostAtB, isEmpty);
+      expect(peers.a.isConnected(kIdB), isTrue);
+    });
+
+    test('stopping closes data connections as well as chat ones', () async {
+      // The socket a opened is the one under test. It is in no server's accept
+      // list and no `_Peer` slot, so nothing else in the pool would ever close
+      // it — a transfer in flight when the user quits is over either way, and
+      // leaving the socket open would keep the app alive on Android.
+      final Peers peers = await connectedPeers();
+      addTearDown(peers.dispose);
+
+      final List<DataConnection> atB = <DataConnection>[];
+      peers.b.dataConnections.listen(atB.add);
+
+      await peers.a.connectData(kIdB, xferId: 'xfer-9');
+      await waitUntil(
+        () => atB.isNotEmpty,
+        describe: 'b to route the data connection',
+      );
+
+      await peers.a.stop();
+
+      expect(
+        await waitForClosed(atB.single.connection),
+        ConnectionClosedReason.remoteBye,
+      );
+      expect(peers.b.isConnected(kIdA), isFalse);
+    });
+  });
+
   group('shutdown', () {
-    test('stopping announces the goodbye so the peer notices at once', () async {
+    test('stopping announces the goodbye so the peer notices at once',
+        () async {
       // Without the flush before teardown the peer would only find out when its
       // ninety-second idle timeout expired.
       final Peers peers = await connectedPeers();
@@ -576,9 +858,9 @@ void main() {
     });
 
     test('stopping twice is harmless', () async {
-      final ConnectionManager a = managerFor(kIdA);
+      final ConnectionManager a = await managerFor(kIdA);
       addTearDown(a.dispose);
-      await a.start();
+
       await a.stop();
       await a.stop();
       expect(a.boundPort, isNull);

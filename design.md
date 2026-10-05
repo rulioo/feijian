@@ -412,7 +412,7 @@ AP 隔离下，两端都在正常广播，只是包根本到不了对面。更�
 
 | type | 方向 | header 字段 | 说明 |
 |---|---|---|---|
-| `hello` | 双向 | `role`, `deviceId`, `name`, `device`, `icon`, `port`, `version`, `caps` | 连接建立后**第一帧**，`role` ∈ `control`/`data` |
+| `hello` | 双向 | `role`, `deviceId`, `name`, `device`, `icon`, `port`, `version`, `caps`, `xferId?` | 连接建立后**第一帧**，`role` ∈ `control`/`data`；`xferId` 见 §4.4.2 |
 | `msg` | 双向 | `msgId`, `ts`, `text`, `replyTo?` | 文字消息 |
 | `msg_ack` | 双向 | `msgId`, `ts` | 送达回执 |
 | `file_offer` | 发送方→接收方 | `xferId`, `name`, `totalSize`, `mime`, `isDir`, `files[]?`, `sha256?`, `mtime` | 传输请求（`totalSize`，**不是** `size` —— 见 §4.2） |
@@ -452,6 +452,20 @@ AP 隔离下，两端都在正常广播，只是包根本到不了对面。更�
 
 1. **发送路径不能等连接。** 用户点发送时若对端刚离线，等 `connect` 返回再决定"发不出去"会让界面卡两秒。正确做法是先落库、标 `pending`、立即返回，由后台连接与离线队列（§5.2）负责最终送达。
 2. **重连退避要按"每次尝试本身就要两秒"来设计。** 退避间隔短于失败耗时没有意义——真正的节奏由 connect 的失败时间决定，`kReconnectBackoff` 只负责在成功之后拉长间隔。
+
+#### 4.4.2 data 连接的归属与路由（M3 实现约定）
+
+`role=data` 的连接是**一次传输的私有 socket**，不属于连接池。这一层已经实现（`ConnectionManager.dataConnections` / `connectData`），下面几条是实现时定下来的。
+
+| 决定 | 结论 | 理由 |
+|---|---|---|
+| `hello` 增加 `xferId?` | **可选**，控制连接上完全不发送 | `file_data` 带 `xferId`，但接收方在 data socket 上看到的第一帧是 `hello`。并发上限 `kMaxConcurrentXfers = 3`，没有这个字段就只能先缓冲一个来路不明的 socket、等第一个 `file_data` 来猜归属；发送方开了连接却不发数据时，这个 socket 永远没人认领 |
+| 应答帧回显 `xferId` | 接收方用 `selfHello.answering(request)`，**role 和 xferId 都取自对方的请求** | 只回 role 不回 xferId，发送方就无法确认"我请求的那条 data 连接被接受了"——回显什么都不能说明，等于该字段白加。这是实现时真实踩到的：offering 侧拿到 `peerHello.xferId == null`，测试当场失败 |
+| 不携带 `xferId` 的 data 连接 | **立即关闭**并记日志 | 没有传输可以认领它。放着不管等于替一个不存在的传输长期持有一个 socket 和一条心跳 |
+| 无人监听 `dataConnections` 时 | **立即关闭**并记日志 | data 连接是不请自来的，没人认领就永远没人关。会话层在构造时就订阅，不是等用户点开某个会话才订阅 |
+| data 连接断开 | **不上报 `peerLost`、不触发重连** | 一次正常完成的传输结束时 socket 就是会断的。当成掉线会去冲刷离线队列、把在线设备变灰 |
+| 帧的归属 | 连接**握手完成、role 确定之后**才 `listen(frames)` | `ControlConnection.frames` 是单订阅流：谁先 attach 谁就拥有这条 socket 的全部帧。data 连接的帧归传输，控制连接的帧归连接池。握手前不会丢帧——`ControlConnection` 会丢弃 ready 之前的非 hello 帧，而单订阅 controller 在有 listener 之前会缓冲 |
+| 停止时要关 data 连接 | `stop()` 单独遍历 `_dataSockets` | 它既不在任何 `_Peer` 槽位里，也不在 server 的 accept 清单里（主动拨出的那条尤其不是），不显式记住就没有第二个人会关它 |
 
 ### 4.5 消息可靠性与去重
 
@@ -518,6 +532,25 @@ while (offset < size) {
 3. 接收方确认后，发送端**顺序**发送各文件（每个文件一条 data 连接，`relPath` 放在帧 header 中）
 4. 接收端按 `relPath` 重建目录结构；**空目录也要创建**
 5. 清单超过 **256 KB**（约数千文件）时提示用户"文件夹包含过多文件"，v1 不支持，P2 再优化为单独连接传清单
+
+#### 4.6.1 字节搬运层的实现约定（M3）
+
+把文件读出去、把文件写进来这一层（`lib/core/transfer/`）已经完成。下面几条是实现时才定下来的，写在这里以免以后重新争论。
+
+| 决定 | 结论 | 理由 |
+|---|---|---|
+| 接收端"传完了"的判据 | **字节数齐全**，`eof` 只作记录 | 空文件没有任何数据块，也就永远不会有 `eof`。把它当判据，等于所有 0 字节文件都永远传不完 —— 这是实现时踩到的真实 bug，即 §4.6 流程图里 `file_data eof` 与 `file_done` 两个信号对单文件是冗余的 |
+| 背压阈值的单位 | **字节**（`kFileFlushBytes = 2 MB`），不按块数 | 块大小是可注入的（测试用 4 KB）。按块数算，阈值会随块大小漂移；按字节算，"在途数据 ≤ 2 MB"这条不变量与块大小无关 |
+| `flush()` | 必须 `await` | 不 await 的 flush 根本不是背压：循环会照常冲在前面，缓冲区照常长大 |
+| 循环结束 | 尾块后**补一次** flush | 否则最后不足 2 MB 的部分留在缓冲区里，进度条停在 99% |
+| 断点续传 | **延后**，`file_accept` 一律回 `resumeFrom: 0` | 见下 |
+| `FrameSink` 接口 | 只为让发送循环可测 | 真实的 socket 无论发送方怎么做都会立即接受写入，对端看不出有没有 flush —— 节奏是这一层唯一要保证的东西，而它需要一个可数的接收端 |
+
+**为什么续传要延后，而不是顺手做掉**：判断"能不能从这个 `.part` 接着写"的依据必须是 `transfer` 表里那次未完成传输的 `bytes_total` / `temp_path`，不能是"下载目录里有个同名 `.part`"。后者会把两次内容不同的同名传输接在一起，产物是一个大小正确、内容错乱、双方都报告成功的文件 —— 和 §4.6.1 上面那条"字节数齐全"一样，是必须由发起方而不是文件名来决定的事。等会话层建好了 `transfer` 行，续传就是它的三行代码。
+
+**路径穿越防护在 `SafeName.fileName()`**：只保留最后一个路径分量，剥离控制字符、Windows 非法字符集、Windows 保留设备名（`CON`/`NUL`/`COM1`…，按 stem 判断所以 `CON.txt` 也中）、首尾空白与结尾的点。长度按 **UTF-8 字节**截断而不是字符数，并且保留扩展名 —— 一个 255 字符的中文名是 765 字节，按字符数放行会在文件都已经传完之后才被文件系统拒绝。
+
+**这块的测试与被破坏时的表现**（每组都实际验证过删掉守卫会有测试失败）：`safe_name_test.dart` 22 条（其中一组枚举恶意输入，断言输出永不为空、永不为 `.`/`..`、永不含分隔符与冒号）；`incoming_file_test.dart` 26 条用真实临时目录，因为要验的是文件系统最后剩下什么；`outgoing_file_test.dart` 23 条用一个记账用的假 sink，删掉周期性 flush 会有 2 条失败、把 `await flush()` 改成不 await 会有 1 条失败；`transfer_receiver_test.dart` 27 条，删掉 offset 校验 / xferId 校验 / 越界校验分别有 3 / 2 / 2 条失败。
 
 ---
 

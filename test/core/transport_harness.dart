@@ -50,6 +50,7 @@ HelloPayload helloFor(
   int version = kProtocolVersion,
   DeviceType deviceType = DeviceType.windows,
   DeviceIcon icon = DeviceIcon.desktop,
+  String? xferId,
 }) {
   return HelloPayload(
     role: role,
@@ -59,6 +60,7 @@ HelloPayload helloFor(
     icon: icon,
     port: port,
     version: version,
+    xferId: xferId,
   );
 }
 
@@ -176,7 +178,8 @@ Future<T> waitForValue<T>(
   T value = await read();
   while (!done(value)) {
     if (DateTime.now().isAfter(deadline)) {
-      fail('timed out after $timeout waiting for $describe (last value: $value)');
+      fail(
+          'timed out after $timeout waiting for $describe (last value: $value)');
     }
     await Future<void>.delayed(const Duration(milliseconds: 10));
     value = await read();

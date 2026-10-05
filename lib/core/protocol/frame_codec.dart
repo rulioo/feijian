@@ -50,7 +50,7 @@ const String kFrameSizeKey = 'size';
 /// One frame: a JSON header plus an optional binary payload.
 class Frame {
   Frame(Map<String, Object?> header, {this.payload})
-    : header = Map<String, Object?>.unmodifiable(header);
+      : header = Map<String, Object?>.unmodifiable(header);
 
   /// Convenience constructor: the `type` plus the frame's own fields.
   ///
@@ -73,20 +73,20 @@ class Frame {
   String get type => header['type']! as String;
 
   bool get isKnownType => const <String>{
-    FrameType.hello,
-    FrameType.msg,
-    FrameType.msgAck,
-    FrameType.fileOffer,
-    FrameType.fileAccept,
-    FrameType.fileReject,
-    FrameType.fileData,
-    FrameType.fileDone,
-    FrameType.fileCancel,
-    FrameType.xferDone,
-    FrameType.ping,
-    FrameType.pong,
-    FrameType.bye,
-  }.contains(type);
+        FrameType.hello,
+        FrameType.msg,
+        FrameType.msgAck,
+        FrameType.fileOffer,
+        FrameType.fileAccept,
+        FrameType.fileReject,
+        FrameType.fileData,
+        FrameType.fileDone,
+        FrameType.fileCancel,
+        FrameType.xferDone,
+        FrameType.ping,
+        FrameType.pong,
+        FrameType.bye,
+      }.contains(type);
 
   /// Debug rendering that never dumps a whole payload.
   @override
@@ -170,7 +170,8 @@ class FrameDecoder {
   /// Throws [FrameException] if the stream cannot be a frame stream.
   List<Frame> add(List<int> chunk) {
     if (_broken) {
-      throw const FrameException('decoder was declared broken by an earlier error');
+      throw const FrameException(
+          'decoder was declared broken by an earlier error');
     }
     _ready.clear();
     _buffer.add(chunk);
@@ -232,9 +233,8 @@ class FrameDecoder {
         return; // payload still arriving
       }
 
-      final Uint8List? payload = payloadLen == 0
-          ? null
-          : _buffer.copy(4 + headerLen, payloadLen);
+      final Uint8List? payload =
+          payloadLen == 0 ? null : _buffer.copy(4 + headerLen, payloadLen);
       _buffer.consume(4 + headerLen + payloadLen);
       _ready.add(Frame(header, payload: payload));
     }
@@ -256,7 +256,8 @@ class FrameDecoder {
       throw FrameException('header is not valid JSON: ${error.message}');
     }
     if (decoded is! Map<String, Object?>) {
-      throw FrameException('header must be a JSON object, got ${decoded.runtimeType}');
+      throw FrameException(
+          'header must be a JSON object, got ${decoded.runtimeType}');
     }
 
     final Object? type = decoded['type'];
@@ -286,7 +287,14 @@ class _ByteQueue {
       return;
     }
     final int needed = length + chunk.length;
-    if (needed > _data.length) {
+    // The write below lands at [_end], so the room that has to exist is the room
+    // after [_end] — not [needed], which counts from [_start] and is short by
+    // however much has already been consumed. Comparing the wrong one let the
+    // write run past the end of the backing store whenever a chunk arrived at a
+    // capacity boundary with a partly-drained queue, which is an ordinary thing
+    // for a stream of `file_data` frames to do: a `RangeError` out of the frame
+    // decoder, mid-transfer, on the connection carrying the file.
+    if (_end + chunk.length > _data.length) {
       int capacity = _data.isEmpty ? 1024 : _data.length;
       while (capacity < needed) {
         capacity *= 2;
@@ -313,8 +321,8 @@ class _ByteQueue {
   /// A copy of [count] bytes at [offset]. A copy rather than a view: the
   /// backing store is reused and compacted, so a view would be silently
   /// rewritten under whoever holds it.
-  Uint8List copy(int offset, int count) =>
-      Uint8List.fromList(Uint8List.sublistView(_data, _start + offset, _start + offset + count));
+  Uint8List copy(int offset, int count) => Uint8List.fromList(
+      Uint8List.sublistView(_data, _start + offset, _start + offset + count));
 
   void consume(int count) {
     _start += count;

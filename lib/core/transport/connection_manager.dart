@@ -24,6 +24,23 @@ class IncomingMessage {
   String toString() => 'IncomingMessage($peerId, ${payload.msgId})';
 }
 
+/// A file-transfer frame from a peer — design.md §4.3.
+///
+/// Handed up as the raw [Frame] rather than a parsed payload, because which
+/// payload a frame is depends on its type and the transfer it belongs to is
+/// keyed on its `xferId` — both of which the session layer knows and this one
+/// does not. The alternative, parsing here, would put the offer/accept/reject
+/// state machine's vocabulary into the connection pool.
+class IncomingTransferFrame {
+  const IncomingTransferFrame({required this.peerId, required this.frame});
+
+  final String peerId;
+  final Frame frame;
+
+  @override
+  String toString() => 'IncomingTransferFrame($peerId, ${frame.type})';
+}
+
 /// A message we sent that the peer has confirmed receiving.
 class MessageDelivered {
   const MessageDelivered({required this.peerId, required this.msgId});
@@ -78,6 +95,39 @@ class DialResult {
   final DialProblem? problem;
 
   bool get isConnected => hello != null;
+}
+
+/// A `role: data` connection a peer opened for one of its transfers —
+/// design.md §4.4.
+///
+/// Handed over rather than kept, because a data connection is not the pool's
+/// kind of object: it belongs to one transfer for the length of that transfer,
+/// it says nothing about whether the peer is reachable, and it must never
+/// trigger a reconnect. What the pool does keep is the [xferId] the peer named
+/// in its `hello`, which is what lets the transfer layer claim it before
+/// reading a byte.
+class DataConnection {
+  const DataConnection({
+    required this.peerId,
+    required this.xferId,
+    required this.connection,
+  });
+
+  /// Who opened it.
+  final String peerId;
+
+  /// The transfer it is for, as the peer named it in its `hello`.
+  ///
+  /// Never null here: a data connection that names no transfer is closed before
+  /// it reaches this class, because there is nothing that could ever claim it.
+  final String xferId;
+
+  /// The socket. Its `frames` are unread — the receiver subscribes, and whoever
+  /// subscribes owns every frame on it.
+  final ControlConnection connection;
+
+  @override
+  String toString() => 'DataConnection($peerId, $xferId)';
 }
 
 /// A peer's connection went away.
@@ -147,6 +197,25 @@ class ConnectionManager {
       StreamController<MessageDelivered>.broadcast();
   final StreamController<MessageDeliveryFailed> _failed =
       StreamController<MessageDeliveryFailed>.broadcast();
+  final StreamController<DataConnection> _dataConnections =
+      StreamController<DataConnection>.broadcast();
+  final StreamController<IncomingTransferFrame> _transferFrames =
+      StreamController<IncomingTransferFrame>.broadcast();
+
+  /// Every live `role: data` socket, whichever side opened it.
+  ///
+  /// Tracked for exactly one reason: [stop] has to close them. They are
+  /// deliberately not in `_peers` — a data connection is a transfer's, not a
+  /// peer's, and putting it there would have the pool's dedupe, retry and
+  /// lost-peer logic act on a socket none of that applies to.
+  final Set<ControlConnection> _dataSockets = <ControlConnection>{};
+
+  /// Connections whose role has already been decided.
+  ///
+  /// `_onReady` runs from both a `stateChanges` event and a readiness check, and
+  /// routing a socket twice would try to listen to its single-subscription frame
+  /// stream a second time.
+  final Set<ControlConnection> _routed = <ControlConnection>{};
 
   FeijianServer? _server;
   StreamSubscription<ControlConnection>? _acceptSub;
@@ -165,6 +234,26 @@ class ConnectionManager {
 
   Stream<MessageDeliveryFailed> get deliveryFailed => _failed.stream;
 
+  /// Accepted `role: data` connections, for whoever runs file transfers.
+  ///
+  /// Broadcast, and closing an unclaimed data connection is deliberate: it
+  /// arrives without anyone asking for it, so a socket nobody is listening for
+  /// is a socket nobody will ever close. The transfer layer subscribes when it
+  /// is constructed rather than when the user first opens a conversation, or
+  /// every transfer offered before then would be refused.
+  Stream<DataConnection> get dataConnections => _dataConnections.stream;
+
+  /// `file_offer`, `file_accept`, `file_reject`, `file_done`, `file_cancel` and
+  /// `xfer_done` — everything a transfer says on the control connection.
+  ///
+  /// The handshake itself travels here rather than on the data connection,
+  /// because the data connection does not exist until `file_accept` has been
+  /// answered (design.md §4.6). Like [dataConnections] this is broadcast and
+  /// unclaimed frames are dropped rather than buffered: a transfer frame is
+  /// about a transfer, and a pool that held them for a session layer which
+  /// never arrived would grow without bound.
+  Stream<IncomingTransferFrame> get transferFrames => _transferFrames.stream;
+
   /// The bound listen port, or null when stopped.
   int? get boundPort => _server?.boundPort;
 
@@ -173,7 +262,8 @@ class ConnectionManager {
           if (e.value.connection?.isReady ?? false) e.key,
       };
 
-  bool isConnected(String peerId) => _peers[peerId]?.connection?.isReady ?? false;
+  bool isConnected(String peerId) =>
+      _peers[peerId]?.connection?.isReady ?? false;
 
   /// True once we have decided this peer is worth keeping a connection to.
   bool isWanted(String peerId) => _peers[peerId]?.wanted ?? false;
@@ -230,9 +320,20 @@ class ConnectionManager {
       peer.connection = null;
     }
 
+    // Data connections are reached separately because they have no `_Peer` to
+    // be found through. They stop with everything else: a transfer in flight
+    // when the user quits is over either way, and leaving its socket open would
+    // keep the app alive on Android.
+    final List<ControlConnection> data =
+        List<ControlConnection>.of(_dataSockets);
+    _dataSockets.clear();
+
     // The server closes anything it accepted but has not handed over yet; these
     // are the ones it already handed over.
-    await Future.wait(live.map((ControlConnection c) => c.close()));
+    await Future.wait(<Future<void>>[
+      for (final ControlConnection c in live) c.close(),
+      for (final ControlConnection c in data) c.close(),
+    ]);
 
     final FeijianServer? server = _server;
     _server = null;
@@ -251,7 +352,10 @@ class ConnectionManager {
       _incoming.close(),
       _delivered.close(),
       _failed.close(),
+      _dataConnections.close(),
+      _transferFrames.close(),
     ]);
+    _routed.clear();
   }
 
   // --- Public API -----------------------------------------------------------
@@ -413,8 +517,8 @@ class ConnectionManager {
     });
     // A connection that ends without ever becoming ready has to finish this too,
     // or a refusal would sit here for the whole timeout on a socket already gone.
-    closed = connection.closed
-        .listen((ConnectionClosedReason _) => finish(null));
+    closed =
+        connection.closed.listen((ConnectionClosedReason _) => finish(null));
     timer = Timer(timeout, () => finish(null));
 
     return done.future;
@@ -459,6 +563,22 @@ class ConnectionManager {
     peer!.wanted = true;
     _trackPending(peerId, payload);
     return true;
+  }
+
+  /// Writes a file-transfer [frame] on the control connection to [peerId].
+  ///
+  /// Deliberately has no delivery tracking, unlike [sendMessage]. A `msg` is
+  /// owed to the peer until it is acked; a `file_offer` is not — it is the first
+  /// step of a handshake whose next step has a deadline, and re-sending an offer
+  /// the peer already accepted would be a second transfer of the same file. The
+  /// sender waits for an answer and gives up, which is what the transfer layer
+  /// is for.
+  bool sendTransfer(String peerId, Frame frame) {
+    final ControlConnection? connection = _peers[peerId]?.connection;
+    if (connection == null || !connection.isReady) {
+      return false;
+    }
+    return connection.send(frame);
   }
 
   /// Confirms receipt of [msgId] to [peerId].
@@ -545,13 +665,20 @@ class ConnectionManager {
     }
   }
 
-  /// Starts tracking a connection. Reads its frames from here on.
+  /// Starts tracking a connection's lifecycle.
+  ///
+  /// Deliberately does *not* start reading its frames. What a connection is for
+  /// is only known once its `hello` has arrived, and `ControlConnection.frames`
+  /// is single-subscription: whichever layer attaches first owns every frame on
+  /// the socket. A control connection's frames belong here and a data
+  /// connection's belong to the transfer that asked for it, so the subscription
+  /// waits for the role — see [_onReady]. Nothing is lost by waiting, since the
+  /// controller buffers until a listener arrives.
   void _adopt(ControlConnection connection) {
     if (_stopping) {
       unawaited(connection.close());
       return;
     }
-    connection.frames.listen((Frame frame) => _onFrame(connection, frame));
     connection.stateChanges.listen((ConnectionState state) {
       if (state == ConnectionState.ready) {
         _onReady(connection);
@@ -575,6 +702,11 @@ class ConnectionManager {
     if (hello == null || peerId == null) {
       return;
     }
+    if (!_routed.add(connection)) {
+      // Already handled — the readiness check in `_adopt` can race the stream
+      // event, and a second pass would try to listen to the frame stream twice.
+      return;
+    }
 
     if (peerId == selfHello.deviceId) {
       // We found ourselves — our own announce came back off the network and we
@@ -586,13 +718,11 @@ class ConnectionManager {
     }
 
     if (hello.role != ConnectionRole.control) {
-      // A data connection is one file transfer's socket (design.md §4.4), and
-      // nothing in this build speaks it. Closing is the honest answer; M3 will
-      // route it instead.
-      _log('refusing a "${hello.role.wire}" connection from $peerId');
-      unawaited(connection.close());
+      _routeData(connection, peerId, hello);
       return;
     }
+
+    connection.frames.listen((Frame frame) => _onFrame(connection, frame));
 
     final _Peer peer = _peerFor(peerId);
     if (identical(peer.connection, connection)) {
@@ -635,6 +765,132 @@ class ConnectionManager {
     }
   }
 
+  /// Hands an accepted `role: data` connection to the transfer that asked for
+  /// it — design.md §4.4.
+  ///
+  /// The pool's involvement ends here. It does not read the socket and does not
+  /// file the peer anywhere: a data connection is one transfer's property for
+  /// the length of that transfer, and it is not evidence that the peer is
+  /// reachable or unreachable.
+  void _routeData(
+    ControlConnection connection,
+    String peerId,
+    HelloPayload hello,
+  ) {
+    if (connection.isOutbound) {
+      // Unreachable today: `_adopt` is only given sockets the server accepted
+      // and the control dial. Guarded anyway, because an outbound data
+      // connection already has an owner — the caller of [connectData] is
+      // holding it — and routing it here would hand one socket to two readers.
+      _log('ignoring a self-opened data connection to $peerId');
+      return;
+    }
+
+    final String? xferId = hello.xferId;
+    if (xferId == null) {
+      // No transfer can ever claim this socket: the peer opened it without
+      // saying which one it belongs to, and with up to [kMaxConcurrentXfers]
+      // running there is nothing to infer it from. Closing beats holding a
+      // socket and a heartbeat open on behalf of a transfer that is not ours.
+      _log('closing an unattributed data connection from $peerId');
+      unawaited(connection.close());
+      return;
+    }
+
+    if (!_dataConnections.hasListener) {
+      // What the pool did before transfers existed, now with the right reason
+      // in the log: a data connection arrives without anyone asking for it, so
+      // an unclaimed one is a socket nobody would ever close.
+      _log('no transfer layer is listening; refusing data from $peerId');
+      unawaited(connection.close());
+      return;
+    }
+
+    _trackData(connection);
+    _dataConnections.add(
+      DataConnection(peerId: peerId, xferId: xferId, connection: connection),
+    );
+  }
+
+  /// Opens a `role: data` connection to [peerId] for one transfer.
+  ///
+  /// Separate from the control connection on purpose (design.md §4.6): file
+  /// bytes on the control socket would block the heartbeats and chat messages
+  /// queued behind a multi-gigabyte file, and cancelling a transfer would mean
+  /// tearing down the conversation with it.
+  ///
+  /// Returns null when the peer cannot be reached, never answers, or answers
+  /// with the wrong role. All three mean the same thing to the caller — this
+  /// transfer cannot proceed — and [FileSendException]/[FileReceiveException]
+  /// already carry the outcome to the user, so no distinction is drawn here.
+  Future<ControlConnection?> connectData(
+    String peerId, {
+    required String xferId,
+    Duration? timeout,
+  }) async {
+    if (_stopping) {
+      return null;
+    }
+    final _Peer? peer = _peers[peerId];
+    final InternetAddress? address = peer?.address;
+    if (peer == null || address == null) {
+      // We have never been told where this peer lives. Reachable only if the
+      // peer was released between accepting an offer and getting here.
+      _log('no address for $peerId; cannot open a data connection');
+      return null;
+    }
+
+    final ControlConnection connection;
+    try {
+      connection = await ControlConnection.connect(
+        address: address,
+        port: peer.port,
+        selfHello: selfHello.forTransfer(xferId),
+        tuning: tuning,
+        onLog: onLog,
+        clock: _clock,
+      );
+    } on Object catch (error) {
+      _log('data connection to $peerId failed: $error');
+      return null;
+    }
+
+    final HelloPayload? hello =
+        await _helloWithin(connection, timeout ?? tuning.connectTimeout);
+    if (hello == null) {
+      _log('no hello on the data connection to $peerId');
+      await connection.close();
+      return null;
+    }
+    if (hello.role != ConnectionRole.data) {
+      // It answered our `data` hello with a control one. Carrying on would have
+      // it read file bytes as chat frames, so there is nothing to salvage.
+      _log('$peerId answered a data hello with a "${hello.role.wire}" one');
+      await connection.close();
+      return null;
+    }
+
+    if (_stopping) {
+      // The pool stopped while the handshake was in flight. Closing here rather
+      // than returning it keeps `stop()`'s promise that nothing is left open.
+      await connection.close();
+      return null;
+    }
+
+    _trackData(connection);
+    _log('data connection to $peerId open for $xferId');
+    return connection;
+  }
+
+  /// Starts closing [connection] when the pool stops, and forgets it when it
+  /// ends on its own.
+  void _trackData(ControlConnection connection) {
+    _dataSockets.add(connection);
+    connection.closed.listen((ConnectionClosedReason _) {
+      _dataSockets.remove(connection);
+    });
+  }
+
   /// Which of two live connections to a peer to keep — design.md §4.4.
   ///
   /// Both ends must reach the same answer without negotiating, so the rule is
@@ -673,6 +929,7 @@ class ConnectionManager {
   }
 
   void _onClosed(ControlConnection connection, ConnectionClosedReason reason) {
+    _routed.remove(connection);
     final String? peerId = connection.remoteId;
 
     // A connection that was already replaced finishes here after the newcomer
@@ -681,6 +938,18 @@ class ConnectionManager {
     if (peerId == null) {
       return;
     }
+
+    // A data connection is one transfer's socket (design.md §4.4). Its death
+    // says nothing about whether the peer is reachable, so it must not be
+    // reported as a lost peer and must not start a reconnect — the transfer
+    // that owns it is listening to the same socket and decides what happens
+    // next. Without this the ordinary end of a finished transfer would look
+    // like the peer going offline and would drain the offline queue at it.
+    if (connection.peerHello?.role != ConnectionRole.control) {
+      _log('$peerId: data connection closed (${reason.name})');
+      return;
+    }
+
     final _Peer? peer = _peers[peerId];
     if (peer == null || !identical(peer.connection, connection)) {
       _log('$peerId: superseded connection closed (${reason.name})');
@@ -721,7 +990,8 @@ class ConnectionManager {
     }
     switch (frame.type) {
       case FrameType.msg:
-        final PayloadDecode<MessagePayload> decoded = MessagePayload.from(frame);
+        final PayloadDecode<MessagePayload> decoded =
+            MessagePayload.from(frame);
         if (!decoded.isSuccess) {
           // One unreadable message is not a reason to drop a working
           // connection (§4.3 drops the connection for framing errors only).
@@ -729,7 +999,8 @@ class ConnectionManager {
           return;
         }
         if (!_incoming.isClosed) {
-          _incoming.add(IncomingMessage(peerId: peerId, payload: decoded.value!));
+          _incoming
+              .add(IncomingMessage(peerId: peerId, payload: decoded.value!));
         }
         return;
 
@@ -742,10 +1013,33 @@ class ConnectionManager {
         _onAck(peerId, decoded.value!.msgId);
         return;
 
+      case FrameType.fileOffer:
+      case FrameType.fileAccept:
+      case FrameType.fileReject:
+      case FrameType.fileDone:
+      case FrameType.fileCancel:
+      case FrameType.xferDone:
+        // The transfer conversation (design.md §4.6). Passed up unparsed — see
+        // [IncomingTransferFrame] — and dropped when nothing is listening, which
+        // is what a build without file transfer is.
+        if (!_transferFrames.isClosed) {
+          _transferFrames.add(
+            IncomingTransferFrame(peerId: peerId, frame: frame),
+          );
+        }
+        return;
+
+      case FrameType.fileData:
+        // File bytes belong on a data connection (design.md §4.4). One arriving
+        // here means the peer lost track of which socket it was writing to, and
+        // the chunk has nowhere to go: this connection has no transfer attached
+        // to it and nothing to write the bytes into.
+        _log('file_data on the control connection from $peerId');
+        return;
+
       default:
-        // File transfer and anything a newer build invents. `file_*` belongs to
-        // M3; unknown types are ignored on purpose so versions interoperate
-        // (§4.3). Both are logged once per frame here rather than at the
+        // Anything a newer build invents. Ignored on purpose so versions
+        // interoperate (§4.3) — logged once per frame here rather than at the
         // connection, because this is the layer that knows it is unimplemented
         // rather than unrecognised.
         _log('unhandled "${frame.type}" from $peerId');
@@ -760,7 +1054,8 @@ class ConnectionManager {
     // reconnect — replaces the old entry rather than doubling the timers.
     _pending.remove(payload.msgId)?.timer?.cancel();
     _abandoned.remove(payload.msgId);
-    final _PendingMessage pending = _PendingMessage(peerId: peerId, payload: payload);
+    final _PendingMessage pending =
+        _PendingMessage(peerId: peerId, payload: payload);
     _pending[payload.msgId] = pending;
     _armAckTimer(pending);
   }

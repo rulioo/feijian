@@ -6,6 +6,7 @@ import '../constants.dart';
 import '../protocol/frame_codec.dart';
 import '../protocol/payloads.dart';
 import 'connection_state.dart';
+import 'frame_sink.dart';
 import 'transport_tuning.dart';
 
 /// One TCP connection to one peer — design.md §4.4.
@@ -24,7 +25,7 @@ import 'transport_tuning.dart';
 /// because the parts most likely to be wrong — a frame split across reads, a
 /// peer that goes silent, a `bye` that must actually leave the machine — exist
 /// only in the real socket.
-class ControlConnection {
+class ControlConnection implements FrameSink {
   ControlConnection._({
     required Socket socket,
     required this.selfHello,
@@ -32,8 +33,8 @@ class ControlConnection {
     this.tuning = const TransportTuning(),
     this.onLog,
     DateTime Function()? clock,
-  }) : _socket = socket,
-       _clock = clock ?? DateTime.now;
+  })  : _socket = socket,
+        _clock = clock ?? DateTime.now;
 
   /// Opens an outbound connection and sends our `hello` on it.
   ///
@@ -157,6 +158,7 @@ class ControlConnection {
   ///
   /// False means the connection is not writable; the caller must treat the
   /// message as unsent rather than assuming it is on its way.
+  @override
   bool send(Frame frame) {
     if (_state == ConnectionState.closed) {
       return false;
@@ -174,6 +176,7 @@ class ControlConnection {
   }
 
   /// Waits for everything written so far to reach the OS.
+  @override
   Future<void> flush() async {
     if (_state == ConnectionState.closed) {
       return;
@@ -216,8 +219,9 @@ class ControlConnection {
 
   // --- Handshake ------------------------------------------------------------
 
-  void _sendHello({ConnectionRole? role}) {
-    if (!_send(selfHello.withRole(role ?? selfHello.role).toFrame())) {
+  /// Sends [as], or our own identity when it is not given.
+  void _sendHello({HelloPayload? as}) {
+    if (!_send((as ?? selfHello).toFrame())) {
       _log('could not send hello');
     }
   }
@@ -235,11 +239,12 @@ class ControlConnection {
     }
 
     // An inbound peer's hello is answered with ours, which is what completes
-    // the handshake in both directions. The role is taken from the peer's
-    // request, not from our own configuration: one listening socket serves both
-    // control and data connections, and only this frame says which it is.
+    // the handshake in both directions. The role, and the transfer when there
+    // is one, are taken from the peer's request rather than from our own
+    // configuration: one listening socket serves both control and data
+    // connections, and only this frame says which it is.
     if (!isOutbound) {
-      _sendHello(role: hello.role);
+      _sendHello(as: selfHello.answering(hello));
     }
 
     _handshakeTimer?.cancel();
@@ -436,6 +441,6 @@ class ControlConnection {
     }
   }
 
-  void _log(String message) =>
-      onLog?.call('conn[${remoteId ?? '?'} ${isOutbound ? 'out' : 'in'}]: $message');
+  void _log(String message) => onLog
+      ?.call('conn[${remoteId ?? '?'} ${isOutbound ? 'out' : 'in'}]: $message');
 }

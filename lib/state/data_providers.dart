@@ -4,6 +4,7 @@ import '../data/database.dart';
 import '../data/repository/chat_repository.dart';
 import '../data/repository/peer_repository.dart';
 import '../data/repository/settings_repository.dart';
+import '../data/repository/transfer_repository.dart';
 
 /// The history database.
 ///
@@ -25,15 +26,20 @@ final Provider<AppDatabase> databaseProvider = Provider<AppDatabase>((Ref ref) {
 
 final Provider<PeerRepository> peerRepositoryProvider =
     Provider<PeerRepository>((Ref ref) {
-      return PeerRepository(ref.watch(databaseProvider));
-    });
+  return PeerRepository(ref.watch(databaseProvider));
+});
 
 final Provider<ChatRepository> chatRepositoryProvider =
     Provider<ChatRepository>((Ref ref) {
-      return ChatRepository(ref.watch(databaseProvider));
-    });
+  return ChatRepository(ref.watch(databaseProvider));
+});
 
 final Provider<SettingsRepository> settingsRepositoryProvider =
     Provider<SettingsRepository>((Ref ref) {
-      return SettingsRepository(ref.watch(databaseProvider));
-    });
+  return SettingsRepository(ref.watch(databaseProvider));
+});
+
+final Provider<TransferRepository> transferRepositoryProvider =
+    Provider<TransferRepository>((Ref ref) {
+  return TransferRepository(ref.watch(databaseProvider));
+});
