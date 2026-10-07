@@ -1,6 +1,7 @@
 package com.feijian.lan
 
 import android.content.Context
+import android.media.RingtoneManager
 import android.net.wifi.WifiManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -33,6 +34,45 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SOUND_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "play" -> result.success(playNotificationSound())
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * Rings the device's notification tone once.
+     *
+     * Flutter's `SystemSound.play(SystemSoundType.alert)` is documented as
+     * ignored on Android — it returns normally and plays nothing — which is why
+     * this exists at all rather than the Dart side handling both platforms.
+     *
+     * `RingtoneManager` rather than a bundled asset or a `MediaPlayer` on one:
+     * the notification tone is the sound this device already uses for "something
+     * arrived", it is the one the user picked, and playing it keeps the
+     * notification volume, the silent switch and Do-Not-Disturb in charge.
+     *
+     * Returns whether a tone was played. False rather than an exception when the
+     * device has no default notification tone (a real configuration on stripped
+     * ROMs): a message that arrives silently is a far better outcome than a
+     * delivery that fails because it could not be announced.
+     */
+    private fun playNotificationSound(): Boolean {
+        return try {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ?: return false
+            val ringtone = RingtoneManager.getRingtone(applicationContext, uri)
+                ?: return false
+            ringtone.play()
+            true
+        } catch (e: Exception) {
+            android.util.Log.w(SOUND_TAG, "could not play the notification sound", e)
+            false
+        }
     }
 
     /**
@@ -79,6 +119,8 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val CHANNEL = "com.feijian.lan/wifi_lock"
+        const val SOUND_CHANNEL = "com.feijian.lan/notification_sound"
         const val LOCK_TAG = "feijian"
+        const val SOUND_TAG = "feijian"
     }
 }

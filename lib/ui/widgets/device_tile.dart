@@ -93,6 +93,13 @@ class DeviceTile extends StatelessWidget {
 ///
 /// Capped at "99+" rather than growing: the badge is a nudge, and its exact
 /// width is not worth a layout that changes shape at three digits.
+///
+/// **Red**, and that is the point of it. The badge started out in the theme's
+/// primary colour, which is the same blue the app puts on every other accent —
+/// a count in it read as decoration. Red is the one colour on this screen that
+/// means "something wants you", and it is already the colour the theme reserves
+/// for that: `error`, which flips to its lighter variant in dark mode instead of
+/// leaving a dark red on a dark background.
 class _UnreadBadge extends StatelessWidget {
   const _UnreadBadge({required this.count});
 
@@ -110,14 +117,14 @@ class _UnreadBadge extends StatelessWidget {
         constraints: const BoxConstraints(minWidth: 20),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         decoration: BoxDecoration(
-          color: theme.colorScheme.primary,
+          color: theme.colorScheme.error,
           borderRadius: BorderRadius.circular(10),
         ),
         child: Text(
           label,
           textAlign: TextAlign.center,
           style: theme.textTheme.labelSmall?.copyWith(
-            color: theme.colorScheme.onPrimary,
+            color: theme.colorScheme.onError,
             fontWeight: FontWeight.w600,
           ),
         ),

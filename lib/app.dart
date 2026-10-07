@@ -8,6 +8,7 @@ import 'ui/pages/devices_page.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/ui_constants.dart';
 import 'ui/widgets/discovery_lifecycle.dart';
+import 'ui/widgets/message_chime.dart';
 import 'ui/widgets/offer_listener.dart';
 
 class FeijianApp extends ConsumerWidget {
@@ -19,24 +20,26 @@ class FeijianApp extends ConsumerWidget {
 
     // Wrapped around the whole app rather than the devices page: being away is
     // a property of the process, not of whichever page happens to be on top.
-    return DiscoveryLifecycle(
-      child: MaterialApp(
-        onGenerateTitle: (BuildContext context) =>
-            AppLocalizations.of(context).appName,
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.light(),
-        darkTheme: AppTheme.dark(),
-        themeMode: ThemeMode.system,
-        // Plumbing for the language override in settings — null follows the
-        // system locale (design.md §8.2).
-        locale: settings.languageCode == null
-            ? null
-            : Locale(settings.languageCode!),
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        // Inside the navigator, so an offer can put a dialog on screen from
-        // wherever the user happens to be (§9.2).
-        home: const OfferListener(child: HomeShell()),
+    return MessageChime(
+      child: DiscoveryLifecycle(
+        child: MaterialApp(
+          onGenerateTitle: (BuildContext context) =>
+              AppLocalizations.of(context).appName,
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: ThemeMode.system,
+          // Plumbing for the language override in settings — null follows the
+          // system locale (design.md §8.2).
+          locale: settings.languageCode == null
+              ? null
+              : Locale(settings.languageCode!),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          // Inside the navigator, so an offer can put a dialog on screen from
+          // wherever the user happens to be (§9.2).
+          home: const OfferListener(child: HomeShell()),
+        ),
       ),
     );
   }
