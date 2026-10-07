@@ -90,6 +90,7 @@ class DevicesPage extends ConsumerWidget {
             EmptyState(
               onAddByIp: () => unawaited(_showAddByIpDialog(context, ref)),
               onRescan: discovery.rescan,
+              problem: ref.watch(discoveryProblemProvider),
             )
           else ...<Widget>[
             for (final Peer peer in peers)
@@ -99,9 +100,8 @@ class DevicesPage extends ConsumerWidget {
                 selected: selected?.id == peer.id,
                 unread: unread[peer.id] ?? 0,
                 onTap: () => openChat(peer),
-                onSendFile: reachable(peer)
-                    ? () => _notImplemented(context)
-                    : null,
+                onSendFile:
+                    reachable(peer) ? () => _notImplemented(context) : null,
               ),
             const SizedBox(height: 20),
             Center(

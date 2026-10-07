@@ -19,7 +19,7 @@ import '../../state/providers.dart';
 class DiscoveryLifecycle extends ConsumerStatefulWidget {
   const DiscoveryLifecycle({
     required this.child,
-    this.minimumAway = const Duration(seconds: 2),
+    this.minimumAway = const Duration(seconds: 1),
     super.key,
   });
 
@@ -28,9 +28,19 @@ class DiscoveryLifecycle extends ConsumerStatefulWidget {
   /// How long the app has to have been away before coming back is worth a scan.
   ///
   /// A rebuild closes the listening socket and binds a new one, so the app is
-  /// deaf for a few milliseconds each time. That is worth paying to recover
-  /// from a freeze, and not worth paying because the user glanced at the app
-  /// switcher. Injectable so tests do not have to wait it out.
+  /// deaf for a few milliseconds each time — worth paying to recover from a
+  /// freeze or a changed network, and the reason this is not simply "every
+  /// `resumed`".
+  ///
+  /// It was two seconds, which was too long: switching to another app and
+  /// straight back takes about that long, so the one gesture a person is most
+  /// likely to try when the list looks stale was the one gesture guaranteed not
+  /// to work. The cost of being wrong is asymmetric — a needless rebuild is a
+  /// few milliseconds nobody sees, a missed one is a list the user has to
+  /// refresh by hand. One second still ignores an instant bounce through the
+  /// app switcher.
+  ///
+  /// Injectable so tests do not have to wait it out.
   final Duration minimumAway;
 
   @override
@@ -72,8 +82,7 @@ class _DiscoveryLifecycleState extends ConsumerState<DiscoveryLifecycle>
         // The cold-start resume lands here too, with `_away` still false, so
         // launching does not rescan a service that has just started.
         final DateTime? leftAt = _leftAt;
-        final bool worthIt =
-            _away &&
+        final bool worthIt = _away &&
             leftAt != null &&
             DateTime.now().difference(leftAt) >= widget.minimumAway;
         _away = false;

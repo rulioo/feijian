@@ -48,10 +48,10 @@ class DiscoveryService implements PeerSource {
     this.startBurstRounds = kStartBurstRounds,
     this.startBurstGap = kStartBurstGap,
     this.silentPeerAfter = kSilentPeerRebindAfter,
-  }) : _discoveryPort = discoveryPort,
-       _bind = bind ?? _bindSocket,
-       _multicast = _parseOrFallback(multicastGroup, kMulticastGroup),
-       _broadcast = InternetAddress(kBroadcastAddress);
+  })  : _discoveryPort = discoveryPort,
+        _bind = bind ?? _bindSocket,
+        _multicast = _parseOrFallback(multicastGroup, kMulticastGroup),
+        _broadcast = InternetAddress(kBroadcastAddress);
 
   /// How often the heartbeat tells the network this device is here.
   ///
@@ -75,7 +75,8 @@ class DiscoveryService implements PeerSource {
   static Future<RawDatagramSocket> _bindSocket(
     InternetAddress address,
     int port,
-  ) => RawDatagramSocket.bind(address, port, reuseAddress: true);
+  ) =>
+      RawDatagramSocket.bind(address, port, reuseAddress: true);
 
   /// The peers currently known. Read it directly; listen to [changes] to know
   /// when it has moved on.
@@ -85,8 +86,15 @@ class DiscoveryService implements PeerSource {
   /// `debugPrint` — and so tests can assert on what was rejected.
   final void Function(String message)? onLog;
 
-  /// Fires whenever [table] changed. Broadcast: the service never depends on
-  /// anyone listening.
+  /// Fires whenever something a listener can see has changed — the peer table,
+  /// or whether discovery is running at all. Broadcast: the service never
+  /// depends on anyone listening.
+  ///
+  /// Lifecycle counts, not just the table. A listener that only hears about peer
+  /// changes cannot tell "discovery never started" from "nobody is out there",
+  /// and the difference between those two is the whole of this class's reported
+  /// history — so a start that succeeds with no peers on the network still has
+  /// to say so.
   @override
   Stream<void> get changes => _changes.stream;
 
@@ -167,8 +175,7 @@ class DiscoveryService implements PeerSource {
 
   /// Consecutive refused writes per socket, and the sockets the first refusal
   /// has already been reported for.
-  final Map<RawDatagramSocket, int> _writeFailures =
-      <RawDatagramSocket, int>{};
+  final Map<RawDatagramSocket, int> _writeFailures = <RawDatagramSocket, int>{};
   final Set<RawDatagramSocket> _reportedFailure = <RawDatagramSocket>{};
 
   /// True while a manual refresh is in flight, so a second press does not bind
@@ -192,7 +199,37 @@ class DiscoveryService implements PeerSource {
   Peer? _self;
   bool _started = false;
 
+  /// True between an explicit [stop] and the next [start].
+  ///
+  /// This is the flag that tells the two ways of not being started apart, and
+  /// [rescan] has to: a service that never got going is exactly what a second
+  /// press of the button is for, while a service that was stopped on purpose is
+  /// not one a refresh button has any business bringing back. [dispose] reaches
+  /// this through [stop], so a disposed service is covered by the same flag —
+  /// and *must* be, because starting one would bind real sockets behind the
+  /// `changes` stream `dispose` has already closed: a service that receives,
+  /// announces, and reports none of it.
+  bool _stopped = false;
+
+  /// True while [_startBody] is in flight — see [start], which is the only
+  /// thing that sets it.
+  bool _starting = false;
+
   bool get isRunning => _started;
+
+  /// Whether anything is being received right now.
+  ///
+  /// Deliberately separate from [isRunning], because the two come apart in the
+  /// state that matters most: a service whose listener could not be bound is
+  /// still *running* — its timers fire, its senders announce, and every peer it
+  /// talks to sees it normally — while hearing nothing at all. From the outside
+  /// that is indistinguishable from an empty network, and telling the two apart
+  /// is the difference between "nobody is there" and "I have gone deaf".
+  bool get isListening => _receiver != null;
+
+  /// Both halves working: sending and receiving. What the device list needs to
+  /// be telling the truth when it says it found nothing.
+  bool get isHealthy => _started && _receiver != null;
 
   /// Addresses we are currently sending from — for the About/diagnostics view,
   /// where "which interface is this thing actually using" is the first
@@ -208,8 +245,7 @@ class DiscoveryService implements PeerSource {
   /// [kAnnounceInterval] to propagate would look like a bug.
   void updateSelf(Peer self) {
     final Peer? previous = _self;
-    final bool identityChanged =
-        previous != null &&
+    final bool identityChanged = previous != null &&
         (previous.name != self.name ||
             previous.icon != self.icon ||
             previous.deviceType != self.deviceType);
@@ -228,10 +264,22 @@ class DiscoveryService implements PeerSource {
   /// if the discovery port cannot be bound — the caller decides whether that is
   /// fatal, because it usually is not: another copy of the app already running
   /// is the common cause.
-  Future<void> start() async {
-    if (_started) {
-      return;
+  Future<void> start() {
+    if (_started || _starting) {
+      // Idempotent, and idempotent *including a start still in flight*.
+      // `_started` only turns true at the very end of one, so a second caller
+      // arriving during launch — a rescan from the refresh button, or from the
+      // app coming back to the foreground — would otherwise read "not started"
+      // and begin another. Both binds pass `reuseAddress`, so the second would
+      // succeed rather than fail: two listeners on the discovery port, one of
+      // them leaked, and the next launch finding its own port taken.
+      return Future<void>.value();
     }
+    _starting = true;
+    return _startBody().whenComplete(() => _starting = false);
+  }
+
+  Future<void> _startBody() async {
     final Peer? self = _self;
     if (self == null) {
       throw StateError('updateSelf() must be called before start()');
@@ -271,6 +319,11 @@ class DiscoveryService implements PeerSource {
     }
 
     _started = true;
+    _stopped = false;
+    // Before the first announce, and deliberately: a consumer that was showing
+    // "discovery is not running" has to stop showing it the moment that is
+    // false, even if the network turns out to be empty.
+    _notify();
 
     // One line, once. When a user reports "it finds nothing", the first
     // question is which interfaces discovery actually picked — and the failure
@@ -367,10 +420,13 @@ class DiscoveryService implements PeerSource {
   /// button that does nothing is indistinguishable from a broken one.
   ///
   /// The rounds are spaced because a user waiting on a result deserves better
-  /// than one datagram's odds. Safe to call before [start] and after [stop],
-  /// where it does nothing.
+  /// than one datagram's odds.
+  ///
+  /// Safe to call before [start] and while a refresh is already in flight. It
+  /// is *not* a no-op in the first case — see [_firstStart] for why that guard
+  /// was removed.
   void rescan() {
-    if (!_started || _refreshing) {
+    if (_refreshing || _stopped) {
       return;
     }
     unawaited(_refresh());
@@ -379,7 +435,11 @@ class DiscoveryService implements PeerSource {
   Future<void> _refresh() async {
     _refreshing = true;
     try {
-      await _rebindAll();
+      if (_started) {
+        await _rebindAll();
+      } else if (!await _firstStart()) {
+        return;
+      }
       for (int round = 0; round < _refreshRounds; round++) {
         if (!_started) {
           return;
@@ -392,6 +452,51 @@ class DiscoveryService implements PeerSource {
       }
     } finally {
       _refreshing = false;
+    }
+  }
+
+  /// Starts a service that never got going — the way back from a start that
+  /// failed.
+  ///
+  /// This used to be the one case [rescan] refused to handle, and the guard
+  /// (`if (!_started) return`) came from reading "not started" as "the user has
+  /// not asked for this yet". It is not: [start] reports a port it cannot bind by
+  /// throwing, the provider that performs it at launch time logs the failure and
+  /// gives up, and nothing else ever tries again. So a device whose discovery
+  /// port was momentarily taken — or blocked at that instant, which is what a
+  /// VPN or a captive portal coming up during launch looks like — spent the rest
+  /// of the process's life with an empty device list and two buttons that could
+  /// not help, because **both of them returned early on the same flag**. Only
+  /// restarting the app could cure it.
+  ///
+  /// That is the whole symptom this class keeps being reported for, arriving
+  /// through a different door each time: the repair exists on the start path and
+  /// the refresh path does not reach it. The button whose only job is "try
+  /// again" must be able to try again.
+  Future<bool> _firstStart() async {
+    if (_self == null) {
+      // No identity yet. [start] would throw a StateError, and a button press is
+      // not the place to find that out — `updateSelf` is called before `start`
+      // by the provider, so this is a race with launch, not a user error.
+      _log('rescan: no identity yet, so discovery cannot start');
+      return false;
+    }
+    try {
+      await start();
+      // [start] returns at once when one is already in flight, so reaching here
+      // is not the same as being up. Reporting "started it" off a call that did
+      // nothing is the kind of line that sends the next investigation down the
+      // wrong path — and a start that is already running does everything this
+      // refresh was going to do anyway, so there is nothing left to skip.
+      if (!_started) {
+        _log('rescan: a start was already in flight');
+        return false;
+      }
+      _log('rescan: discovery was not running; started it');
+      return true;
+    } on Object catch (error) {
+      _log('rescan: could not start discovery: $error');
+      return false;
     }
   }
 
@@ -483,7 +588,8 @@ class DiscoveryService implements PeerSource {
       // Degraded rather than repaired: nothing is listening any more. Loud,
       // because the way out is for the user to press Rescan again and there is
       // no other sign that anything went wrong.
-      _log('could not rebind the listener on $_discoveryPort: ${error.message}');
+      _log(
+          'could not rebind the listener on $_discoveryPort: ${error.message}');
       return;
     }
 
@@ -571,6 +677,12 @@ class DiscoveryService implements PeerSource {
   /// The `bye` is what lets peers drop this device at once; without it they
   /// keep showing it as offline for [kPeerRemoveAfter] after a clean exit.
   Future<void> stop() async {
+    // Set before the early return, not after it. A service whose start failed
+    // was never running, so `_started` is already false and there is nothing
+    // here to close — but it is still being told to end, and a later [rescan]
+    // must not read "not started" as "never tried" and bind sockets behind a
+    // `changes` stream that `dispose` is about to close.
+    _stopped = true;
     if (!_started) {
       return;
     }
@@ -605,6 +717,10 @@ class DiscoveryService implements PeerSource {
     _receiver = null;
 
     table.clear();
+    // `table.clear()` is a table operation, not a lifecycled one, so it does not
+    // notify on its own — without this a deliberate stop would leave every
+    // listener's last-known list on screen.
+    _notify();
   }
 
   /// Stops and closes [changes]. The service cannot be restarted afterwards.
@@ -869,7 +985,8 @@ class DiscoveryService implements PeerSource {
 
   void _handleDatagram(Datagram datagram) {
     final DateTime now = DateTime.now();
-    final AnnounceDecode decoded = AnnouncePacket.decode(datagram.data, now: now);
+    final AnnounceDecode decoded =
+        AnnouncePacket.decode(datagram.data, now: now);
     if (!decoded.isSuccess) {
       _log('ignored ${datagram.address.address}: ${decoded.reason}');
       return;
@@ -907,7 +1024,8 @@ class DiscoveryService implements PeerSource {
 
       case AnnounceType.announce:
         final DateTime? previous = table.lastSeenOf(packet.id);
-        if (table.touch(packet: packet, fromIp: datagram.address.address, now: now)) {
+        if (table.touch(
+            packet: packet, fromIp: datagram.address.address, now: now)) {
           _notify();
         }
 
@@ -957,7 +1075,7 @@ class DiscoveryService implements PeerSource {
   /// threshold is tens of seconds, so a second of jitter costs nothing, and one
   /// less timer is one less thing to cancel in [stop].
   void _repairIfEveryPeerHasGoneQuiet() {
-    if (_refreshing || !_started || _silenceRepaired) {
+    if (_refreshing || _stopped || !_started || _silenceRepaired) {
       return;
     }
 

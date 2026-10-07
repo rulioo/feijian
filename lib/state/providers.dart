@@ -55,17 +55,17 @@ final FutureProvider<Peer> selfDeviceProvider = FutureProvider<Peer>((
 /// typing.
 final Provider<DiscoveryService> discoveryServiceProvider =
     Provider<DiscoveryService>((Ref ref) {
-      final (int, String) endpoint = ref.watch(
-        settingsProvider.select(
-          (AppSettings s) => (s.listenPort, s.multicastAddress),
-        ),
-      );
-      return DiscoveryService(
-        discoveryPort: endpoint.$1,
-        multicastGroup: endpoint.$2,
-        onLog: (String message) => debugPrint('[discovery] $message'),
-      );
-    });
+  final (int, String) endpoint = ref.watch(
+    settingsProvider.select(
+      (AppSettings s) => (s.listenPort, s.multicastAddress),
+    ),
+  );
+  return DiscoveryService(
+    discoveryPort: endpoint.$1,
+    multicastGroup: endpoint.$2,
+    onLog: (String message) => debugPrint('[discovery] $message'),
+  );
+});
 
 /// Peers currently visible on the LAN, pushed as discovery learns about them.
 ///
@@ -73,57 +73,70 @@ final Provider<DiscoveryService> discoveryServiceProvider =
 /// offline on its own schedule updates the list without the UI polling.
 final StreamProvider<List<Peer>> discoveredPeersProvider =
     StreamProvider<List<Peer>>((Ref ref) {
-      final DiscoveryService service = ref.watch(discoveryServiceProvider);
-      final StreamController<List<Peer>> out = StreamController<List<Peer>>();
+  final DiscoveryService service = ref.watch(discoveryServiceProvider);
+  final StreamController<List<Peer>> out = StreamController<List<Peer>>();
 
-      final StreamSubscription<void> changes = service.changes.listen((_) {
-        if (!out.isClosed) {
-          out.add(service.table.peers);
-        }
-      });
+  final StreamSubscription<void> changes = service.changes.listen((_) {
+    if (!out.isClosed) {
+      out.add(service.table.peers);
+    }
+  });
 
-      // Renames and icon changes reach peers as soon as the user makes them.
-      ref.listen<AsyncValue<Peer>>(selfDeviceProvider, (
-        AsyncValue<Peer>? _,
-        AsyncValue<Peer> next,
-      ) {
-        final Peer? self = next.valueOrNull;
-        if (self != null) {
-          service.updateSelf(self);
-        }
-      });
+  // Renames and icon changes reach peers as soon as the user makes them.
+  ref.listen<AsyncValue<Peer>>(selfDeviceProvider, (
+    AsyncValue<Peer>? _,
+    AsyncValue<Peer> next,
+  ) {
+    final Peer? self = next.valueOrNull;
+    if (self != null) {
+      service.updateSelf(self);
+    }
+  });
 
-      unawaited(() async {
-        try {
-          service.updateSelf(await ref.read(selfDeviceProvider.future));
-          await service.start();
-          if (!out.isClosed) {
-            out.add(service.table.peers);
-          }
-        } on Object catch (error, stack) {
-          // Losing the discovery port (already in use, no permission, blocked
-          // by policy) must not take the device list down with it. The empty
-          // state that follows is already the right thing to show, and it
-          // names the firewall as a cause.
-          debugPrint('[discovery] start failed: $error\n$stack');
-          if (!out.isClosed) {
-            out.addError(error, stack);
-          }
-        }
-      }());
+  unawaited(() async {
+    try {
+      service.updateSelf(await ref.read(selfDeviceProvider.future));
+      await service.start();
+      if (!out.isClosed) {
+        out.add(service.table.peers);
+      }
+    } on Object catch (error, stack) {
+      // Losing the discovery port (already in use, no permission, blocked
+      // by policy) must not take the device list down with it. The empty
+      // state that follows is already the right thing to show, and it
+      // names the firewall as a cause.
+      debugPrint('[discovery] start failed: $error\n$stack');
+      if (!out.isClosed) {
+        out.addError(error, stack);
+      }
+    }
+  }());
 
-      ref.onDispose(() {
-        unawaited(changes.cancel());
-        unawaited(service.dispose());
-        unawaited(out.close());
-      });
+  ref.onDispose(() {
+    unawaited(changes.cancel());
+    unawaited(service.dispose());
+    unawaited(out.close());
+  });
 
-      return out.stream;
-    });
+  return out.stream;
+});
 
 /// The discovered peers, or an empty list while discovery is still starting.
 final Provider<List<Peer>> peersProvider = Provider<List<Peer>>((Ref ref) {
   return ref.watch(discoveredPeersProvider).valueOrNull ?? const <Peer>[];
+});
+
+/// Why discovery is not doing its job, or null when it is.
+///
+/// [peersProvider] flattens a failed start into an empty list, which is the
+/// right thing to *render* — but "nobody is out there" and "this device never
+/// started looking" are different sentences, and only the second one is
+/// actionable. Until now they were pixel-identical: an empty screen and a
+/// spinning "Scanning..." that was not true. The bug report that prompted this
+/// ("the refresh button finds nothing") is exactly that ambiguity, and reading
+/// it off a phone needed a logcat session.
+final Provider<Object?> discoveryProblemProvider = Provider<Object?>((Ref ref) {
+  return ref.watch(discoveredPeersProvider).error;
 });
 
 /// Count of reachable peers, for the list section header.

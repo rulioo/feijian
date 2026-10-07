@@ -208,7 +208,8 @@ class _Wire {
 
   /// What went out, for the failure message. A test that says "expected 3, got
   /// 1" without saying which is almost no help at all.
-  String get summary => packets.map((AnnouncePacket p) => p.type.name).join(',');
+  String get summary =>
+      packets.map((AnnouncePacket p) => p.type.name).join(',');
 
   void close() => socket.close();
 }
@@ -281,12 +282,14 @@ void main() {
 
   /// The socket the service listens on. One per service, on the discovery port.
   Iterable<RawDatagramSocket> listeners() => bound.where(
-        (RawDatagramSocket s) => s.address.address == '0.0.0.0' && s.port == port,
+        (RawDatagramSocket s) =>
+            s.address.address == '0.0.0.0' && s.port == port,
       );
 
   /// Sockets bound to the wildcard on some other port — the one that answers.
   Iterable<RawDatagramSocket> answerers() => bound.where(
-        (RawDatagramSocket s) => s.address.address == '0.0.0.0' && s.port != port,
+        (RawDatagramSocket s) =>
+            s.address.address == '0.0.0.0' && s.port != port,
       );
 
   /// The per-interface senders: one per usable address, so a real address.
@@ -342,7 +345,8 @@ void main() {
   test('learns a peer from a datagram and reports the change', () async {
     await startService();
     final List<void> notifications = <void>[];
-    final StreamSubscription<void> sub = service.changes.listen(notifications.add);
+    final StreamSubscription<void> sub =
+        service.changes.listen(notifications.add);
     addTearDown(sub.cancel);
 
     await peer.send(_announce(port: peer.port), port);
@@ -452,7 +456,8 @@ void main() {
   });
 
   test('refuses to start before it knows who it is', () async {
-    final DiscoveryService fresh = DiscoveryService(discoveryPort: await _servicePort());
+    final DiscoveryService fresh =
+        DiscoveryService(discoveryPort: await _servicePort());
     addTearDown(fresh.dispose);
 
     expect(fresh.start, throwsStateError);
@@ -476,16 +481,242 @@ void main() {
     await service.stop(); // must not throw
   });
 
-  test('rescan is safe before start and after stop', () async {
-    final DiscoveryService fresh = DiscoveryService(discoveryPort: await _servicePort());
+  test('rescan before a first start begins one, and after stop does not',
+      () async {
+    // Both halves of the same question, because they are the two ways of not
+    // being started and they call for opposite answers. A service that has not
+    // begun is exactly what the button is for; a service that was stopped on
+    // purpose is not.
+    final int freshPort = await _servicePort();
+    final List<RawDatagramSocket> freshBound = <RawDatagramSocket>[];
+    final DiscoveryService fresh = DiscoveryService(
+      discoveryPort: freshPort,
+      bind: (InternetAddress address, int atPort) async {
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        freshBound.add(socket);
+        return socket;
+      },
+    );
     addTearDown(fresh.dispose);
     fresh.updateSelf(_self);
+    expect(fresh.isHealthy, isFalse);
 
-    fresh.rescan(); // before start
-    await fresh.start();
     fresh.rescan();
+    await _waitUntil(
+      () => fresh.isHealthy,
+      reason: 'the rescan to start discovery from cold',
+    );
+    final int afterStart = freshBound.length;
+    expect(afterStart, greaterThan(0));
+
     await fresh.stop();
-    fresh.rescan(); // after stop
+    fresh.rescan();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(fresh.isRunning, isFalse);
+    expect(
+      freshBound,
+      hasLength(afterStart),
+      reason: 'a stop is deliberate; a refresh button must not undo it',
+    );
+  });
+
+  test('rescan starts a service whose start failed', () async {
+    // The reported symptom, arriving through the one door the refresh path did
+    // not open. `start` reports a port it cannot bind by throwing, the provider
+    // that runs it at launch catches that and gives up, and `rescan` used to
+    // return early on `!_started` — so **both** buttons were dead, the list
+    // stayed empty for the life of the process, and only restarting the app
+    // helped.
+    final int failPort = await _servicePort();
+    final List<String> failLogs = <String>[];
+    final List<RawDatagramSocket> failBound = <RawDatagramSocket>[];
+    bool refuse = true;
+
+    final DiscoveryService flaky = DiscoveryService(
+      discoveryPort: failPort,
+      onLog: failLogs.add,
+      bind: (InternetAddress address, int atPort) async {
+        // Only the listener is refused. Refusing an ephemeral port would be a
+        // different failure than the one a real machine produces.
+        if (refuse && atPort == failPort) {
+          throw const SocketException('discovery port already in use');
+        }
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        failBound.add(socket);
+        return socket;
+      },
+    );
+    addTearDown(flaky.dispose);
+    flaky.updateSelf(_self);
+
+    await expectLater(flaky.start(), throwsA(isA<SocketException>()));
+    expect(flaky.isRunning, isFalse);
+    expect(flaky.isListening, isFalse);
+    final int afterFailure = failBound.length;
+
+    refuse = false;
+    flaky.rescan();
+
+    await _waitUntil(
+      () => flaky.isHealthy,
+      reason: 'the rescan to start discovery',
+      diagnostics: () => '  logs=${failLogs.join(' | ')}',
+    );
+    expect(
+      failLogs.any((String line) => line.contains('discovery was not running')),
+      isTrue,
+      reason: 'and to say so — a button that repairs something silently is how '
+          'this took four builds to find\n  logs=${failLogs.join(' | ')}',
+    );
+    expect(failBound.length, greaterThan(afterFailure));
+
+    // And it is a working service, not just a flag set: a datagram posted at it
+    // is handled, which is the only sense in which "started" means anything.
+    final _FakePeer probe = await _FakePeer.bind();
+    addTearDown(probe.close);
+    await probe.send(_announce(port: probe.port), failPort);
+    await _waitUntil(
+      () => flaky.table.length == 1,
+      reason: 'a peer learned through the recovered service',
+      diagnostics: () => '  logs=${failLogs.join(' | ')}',
+    );
+  });
+
+  test('a disposed service stays disposed even if its start failed', () async {
+    // The narrow case that a `_stopped` set *after* `stop`'s early return would
+    // miss. A service whose start failed was never running, so `stop` has
+    // nothing to close and returns at once — but it is still being told to end,
+    // and `dispose` is about to close `changes`. A later rescan reading "not
+    // started" as "never tried" would bind a full set of sockets behind that
+    // closed stream: announcing, receiving, and reporting none of it.
+    final int deadPort = await _servicePort();
+    final List<RawDatagramSocket> deadBound = <RawDatagramSocket>[];
+    // The port has to come free again, or the guard under test cannot be
+    // reached: a binder that refuses forever would stop an unguarded rescan
+    // from binding anything, and the test would pass without the guard there.
+    bool portBusy = true;
+
+    final DiscoveryService dead = DiscoveryService(
+      discoveryPort: deadPort,
+      bind: (InternetAddress address, int atPort) async {
+        if (portBusy && atPort == deadPort) {
+          throw const SocketException('discovery port already in use');
+        }
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        deadBound.add(socket);
+        return socket;
+      },
+    );
+    dead.updateSelf(_self);
+    await expectLater(dead.start(), throwsA(isA<SocketException>()));
+    expect(dead.isRunning, isFalse);
+
+    // Whatever was holding the port has let go — which is what makes the next
+    // rescan *able* to succeed, and therefore able to leak.
+    portBusy = false;
+    await dead.dispose();
+    final int afterDispose = deadBound.length;
+
+    dead.rescan();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(dead.isRunning, isFalse);
+    expect(
+      deadBound,
+      hasLength(afterDispose),
+      reason: 'sockets bound behind a closed `changes` stream are invisible '
+          'and leaked',
+    );
+  });
+
+  test('starting is reported even when the network is empty', () async {
+    // `changes` used to mean "the table moved", and nothing else. A listener
+    // that hears only about peers cannot tell "discovery is not running" from
+    // "discovery is running and nobody is out there" — and the device list now
+    // says which of those it is, so a start that succeeds onto a quiet network
+    // has to be announced. Without this the "not running" warning would outlive
+    // the fault that caused it and never come down.
+    final DiscoveryService quiet = DiscoveryService(
+      discoveryPort: await _servicePort(),
+    );
+    addTearDown(quiet.dispose);
+    quiet.updateSelf(_self);
+
+    final List<void> heard = <void>[];
+    final StreamSubscription<void> sub = quiet.changes.listen(heard.add);
+    addTearDown(sub.cancel);
+
+    await quiet.start();
+    await _waitUntil(
+      () => heard.isNotEmpty,
+      reason: 'the successful start to be reported to listeners',
+    );
+
+    expect(
+      quiet.table.peers,
+      isEmpty,
+      reason: 'and there was genuinely nothing else to report',
+    );
+  });
+
+  test('a rescan during a start does not begin a second one', () async {
+    // `_started` only turns true at the *end* of a start, so the uncovered
+    // window is the whole of launch — which is precisely when the provider
+    // starts discovery and the app may be coming back to the foreground. Both
+    // binds pass `reuseAddress`, so two overlapping starts would both succeed:
+    // two listeners on the discovery port, one of them leaked, and the next
+    // launch finding its own port taken.
+    final int slowPort = await _servicePort();
+    // Ports, recorded at bind time rather than sockets read later. A doubled
+    // start has the service closing one of its own listeners, and asking a
+    // closed socket for `.port` throws — which would fail this test on the way
+    // to the assertion instead of letting the assertion say what went wrong.
+    final List<int> slowBound = <int>[];
+    final List<String> slowLogs = <String>[];
+    final DiscoveryService slow = DiscoveryService(
+      discoveryPort: slowPort,
+      onLog: slowLogs.add,
+      bind: (InternetAddress address, int atPort) async {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        final RawDatagramSocket socket = await RawDatagramSocket.bind(
+          address,
+          atPort,
+          reuseAddress: true,
+        );
+        slowBound.add(socket.port);
+        return socket;
+      },
+    );
+    addTearDown(slow.dispose);
+    slow.updateSelf(_self);
+
+    final Future<void> first = slow.start();
+    slow.rescan();
+    slow.rescan();
+    await first;
+    await _waitUntil(() => slow.isRunning, reason: 'the start to finish');
+    // Long enough for a second start, had one been begun, to bind everything.
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(
+      slowBound.where((int bound) => bound == slowPort),
+      hasLength(1),
+      reason: 'exactly one listener on the discovery port\n'
+          '  logs=${slowLogs.join(' | ')}',
+    );
   });
 
   // --- Being heard by a network that cannot hear an announce -----------------
@@ -622,7 +853,8 @@ void main() {
   // where nothing arrives, so nothing triggers, and the device list is left
   // showing peers it can no longer hear.
 
-  test('a list of peers that has all gone quiet is rebuilt without being '
+  test(
+      'a list of peers that has all gone quiet is rebuilt without being '
       'asked', () async {
     await startService(silentPeerAfter: const Duration(milliseconds: 300));
     await peer.send(_announce(port: peer.port), port);
@@ -681,7 +913,8 @@ void main() {
     expect(
       listeners(),
       hasLength(afterFirstRepair),
-      reason: 'the repair to have been made once. Repeated every tick, it would '
+      reason:
+          'the repair to have been made once. Repeated every tick, it would '
           'rebuild discovery over and over on a network where nothing is wrong '
           'and the peer it waits for is simply gone',
     );
@@ -840,7 +1073,8 @@ void main() {
     );
   });
 
-  test('rescan rebuilds the listening socket, not just the sending ones', () async {
+  test('rescan rebuilds the listening socket, not just the sending ones',
+      () async {
     // The bug this pins down, in the user's words: after the phone had been
     // off the network for a long stretch, neither Refresh nor Rescan would find
     // the PC again — only killing the app would. The refresh rebuilt the
@@ -887,7 +1121,8 @@ void main() {
     );
   });
 
-  test('a stop that lands mid-rebind leaves no socket open behind it', () async {
+  test('a stop that lands mid-rebind leaves no socket open behind it',
+      () async {
     // `_rebindAll` crosses several awaits — enumerating interfaces, cancelling
     // the old subscription, binding the replacement — and `stop()` can land in
     // any of them. A socket bound *after* the service stopped is one nothing
