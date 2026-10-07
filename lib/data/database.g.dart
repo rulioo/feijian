@@ -1949,8 +1949,8 @@ class $TransfersTable extends Transfers
       'message_id', aliasedName, true,
       type: DriftSqlType.string,
       requiredDuringInsert: false,
-      defaultConstraints:
-          GeneratedColumn.constraintIsAlways('REFERENCES message (id)'));
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES message (id) ON DELETE SET NULL'));
   static const VerificationMeta _attachmentIdMeta =
       const VerificationMeta('attachmentId');
   @override
@@ -1958,8 +1958,8 @@ class $TransfersTable extends Transfers
       'attachment_id', aliasedName, true,
       type: DriftSqlType.string,
       requiredDuringInsert: false,
-      defaultConstraints:
-          GeneratedColumn.constraintIsAlways('REFERENCES attachment (id)'));
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES attachment (id) ON DELETE SET NULL'));
   static const VerificationMeta _peerIdMeta = const VerificationMeta('peerId');
   @override
   late final GeneratedColumn<String> peerId = GeneratedColumn<String>(
@@ -2121,6 +2121,15 @@ class $TransfersTable extends Transfers
 class TransferRow extends DataClass implements Insertable<TransferRow> {
   /// The `xferId` from the wire.
   final String id;
+
+  /// `SET NULL`, not the default (§5.1 rule 2).
+  ///
+  /// The rule's words are 「传输任务可独立于消息清理」 — clear the history and the
+  /// transfer stays behind. `NO ACTION`, which is what a bare `REFERENCES`
+  /// means, says something quite different once `foreign_keys` is on: it
+  /// **refuses the delete**. Every image and file message has a transfer behind
+  /// it, so the default made exactly those messages undeletable and made
+  /// "clear history" fail on any conversation that had ever carried a file.
   final String? messageId;
   final String? attachmentId;
   final String peerId;
@@ -2668,6 +2677,20 @@ abstract class _$AppDatabase extends GeneratedDatabase {
                 limitUpdateKind: UpdateKind.delete),
             result: [
               TableUpdate('attachment', kind: UpdateKind.delete),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('message',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('transfer', kind: UpdateKind.update),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('attachment',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('transfer', kind: UpdateKind.update),
             ],
           ),
         ],

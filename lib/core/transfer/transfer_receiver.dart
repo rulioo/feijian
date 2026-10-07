@@ -31,7 +31,7 @@ class FileReceiveException implements Exception {
 /// user. The session that owns those feeds frames in and asks for the finished
 /// path.
 class TransferReceiver {
-  TransferReceiver._(this._sink, this._xferId);
+  TransferReceiver._(this._sink, this._xferId, this._relPath);
 
   /// Creates the sink for [rawName] and prepares to fill it.
   ///
@@ -45,17 +45,28 @@ class TransferReceiver {
     required String xferId,
     required String rawName,
     required int totalSize,
+    String? relPath,
   }) async {
     final IncomingFile sink = await IncomingFile.create(
       directory: directory,
       rawName: rawName,
       totalSize: totalSize,
     );
-    return TransferReceiver._(sink, xferId);
+    return TransferReceiver._(sink, xferId, relPath);
   }
 
   final IncomingFile _sink;
   final String _xferId;
+
+  /// Which file inside a folder this receiver is filling, or null for a
+  /// transfer that is a single file.
+  ///
+  /// Held so [accept] can refuse a chunk that belongs to a *sibling*. §4.6 rule
+  /// 3 gives every file in a folder the same `xferId`, so the id alone cannot
+  /// tell one file's chunks from another's — and a receiver that took both would
+  /// write the second file's bytes into the first, producing a file of the right
+  /// length that neither side ever sent.
+  final String? _relPath;
 
   bool _finished = false;
   bool _sawEof = false;
@@ -100,6 +111,16 @@ class TransferReceiver {
       // file neither side ever sent.
       throw FileReceiveException(
         'chunk for transfer "$xferId" arrived on the connection for "$_xferId"',
+      );
+    }
+
+    final String? relPath = frame.header['relPath'] as String?;
+    if (relPath != _relPath) {
+      // A chunk for a different file of the same folder. Both are equally this
+      // transfer's, which is exactly why the id check above let it through.
+      throw FileReceiveException(
+        'chunk for "${relPath ?? 'a single file'}" arrived on the connection '
+        'for "${_relPath ?? 'a single file'}"',
       );
     }
 

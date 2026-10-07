@@ -86,18 +86,46 @@ void main() {
   }
 
   Future<int> pump(File file, _RecordingSink sink,
-      {int from = 0, int? chunk}) async {
+      {int from = 0, int? chunk, String? relPath}) async {
     final OutgoingFile source = await OutgoingFile.open(
       file,
       from: from,
       chunkSize: chunk ?? kChunkSize,
     );
     try {
-      return await source.pump(sink, xferId: 'x1');
+      return await source.pump(sink, xferId: 'x1', relPath: relPath);
     } finally {
       await source.close();
     }
   }
+
+  group('a file inside a folder names itself in every chunk', () {
+    // Every chunk, not just the first. The frames of a folder's files share an
+    // `xferId` (4.6 rule 3), so a receiver that took the two files' chunks for
+    // one stream would splice them into a file of the right length that neither
+    // side ever sent.
+    test('each frame carries the relPath', () async {
+      final _RecordingSink sink = _RecordingSink();
+
+      await pump(makeFile('a.bin', 4097), sink,
+          chunk: 4096, relPath: 'sub/a.bin');
+
+      expect(sink.frames, hasLength(2));
+      for (final Frame frame in sink.frames) {
+        expect(frame.header['relPath'], 'sub/a.bin');
+      }
+    });
+
+    test('a single file carries no relPath at all', () async {
+      // Byte-for-byte what M3 sent, which is what keeps an older peer able to
+      // read the frame.
+      final _RecordingSink sink = _RecordingSink();
+
+      await pump(makeFile('plain.bin', 100), sink);
+
+      expect(sink.frames.single.header.containsKey('relPath'), isFalse);
+    });
+  });
 
   group('framing the file into chunks', () {
     test('a file smaller than one chunk is one frame', () async {

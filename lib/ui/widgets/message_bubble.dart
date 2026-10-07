@@ -7,6 +7,7 @@ import '../../core/models/transfer.dart';
 import '../../l10n/app_localizations.dart';
 import 'attachment_card.dart';
 import 'attachment_image.dart';
+import 'folder_card.dart';
 
 /// One message in a conversation — design.md §6.3.
 ///
@@ -27,12 +28,16 @@ class MessageBubble extends StatelessWidget {
     required this.message,
     required this.onRetry,
     this.attachment,
+    this.files = const <Attachment>[],
+    this.task,
     this.onOpen,
     this.onSaveAs,
     this.onCancel,
     this.onAccept,
     this.onDecline,
     this.onOpenImage,
+    this.onOpenFile,
+    this.onSaveFile,
     this.onDelete,
     super.key,
   });
@@ -46,8 +51,27 @@ class MessageBubble extends StatelessWidget {
   /// turn one query into fifty.
   final Attachment? attachment;
 
+  /// The files inside this message, for a folder message — §5.1.1.
+  ///
+  /// Beside [attachment] rather than instead of it, because the two answer
+  /// different questions: [attachment] is "the file this message *is*", and this
+  /// is "the files this message *carries*". A folder has the second and never
+  /// the first, which is why the page passes null for [attachment] on one.
+  final List<Attachment> files;
+
+  /// The live folder transfer behind this message, for a folder message.
+  ///
+  /// Null for everything else, and for a folder whose row has not been read yet.
+  final Transfer? task;
+
   /// Called when the user taps a failed message's warning icon.
-  final VoidCallback onRetry;
+  ///
+  /// Null draws the same icon with nothing behind it. That is a real case and
+  /// not a defensive one: a failed *folder* has no retry — §5.2's retry re-reads
+  /// the source, and a folder's source is not on any row the card holds (§4.6
+  /// keeps a folder's files on the sender's disk and its manifest on the wire) —
+  /// so the ✗ says what happened and does not pretend to be pressable.
+  final VoidCallback? onRetry;
 
   /// Hand a finished file to the system. Null hides the button.
   final VoidCallback? onOpen;
@@ -66,8 +90,20 @@ class MessageBubble extends StatelessWidget {
   /// a bubble in a test or a preview gets.
   final VoidCallback? onOpenImage;
 
+  /// Per-file Open and Save as, for a folder's card.
+  ///
+  /// A function rather than a [VoidCallback] because a folder's card offers one
+  /// per arrived file: [onOpen] is "the file this message is", and there is no
+  /// such file here. Both are null together with [onOpen] and [onSaveAs] on a
+  /// file, since a platform without Save as brings both down.
+  final void Function(Attachment file)? onOpenFile;
+  final void Function(Attachment file)? onSaveFile;
+
   /// Called from the message menu's delete item.
-  final VoidCallback? onDelete;
+  ///
+  /// Answers whether the message actually went, because the menu reports the
+  /// outcome and cannot report it before it has one. Null hides the item.
+  final Future<bool> Function()? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -81,6 +117,7 @@ class MessageBubble extends StatelessWidget {
         mine ? scheme.onPrimaryContainer : scheme.onSurface;
 
     final Attachment? file = attachment;
+    final bool folder = message.type == MessageType.folder;
     final String text = message.text ?? '';
 
     // A picture whose bytes are here is drawn as a picture. Everything else —
@@ -145,12 +182,26 @@ class MessageBubble extends StatelessWidget {
                           onCancel: onCancel,
                           onAccept: onAccept,
                           onDecline: onDecline,
+                        )
+                      else if (folder)
+                        FolderCard(
+                          name: text,
+                          files: files,
+                          task: task,
+                          foreground: foreground,
+                          onOpen: onOpenFile,
+                          onSaveAs: onSaveFile,
+                          onCancel: onCancel,
+                          onAccept: onAccept,
+                          onDecline: onDecline,
                         ),
-                      if (text.isNotEmpty) ...<Widget>[
+                      if (text.isNotEmpty && !folder) ...<Widget>[
                         // A caption under a photo needs the gap; a caption
                         // under a card already has one from the card's own
                         // buttons, and a second would read as a paragraph
-                        // break.
+                        // break. A folder's name is the card's own title, so
+                        // there is no caption left to draw — the message's text
+                        // *is* the name (§5.1.1).
                         if (showImage) const SizedBox(height: 6),
                         Text(
                           text,
@@ -238,8 +289,20 @@ class MessageBubble extends StatelessWidget {
         }
         _toast(context, l10n.messageCopied);
       case _MessageAction.delete:
-        onDelete?.call();
-        _toast(context, l10n.messageDeleted);
+        // Awaited, and the toast says what the answer said. Reporting the
+        // deletion before it had been attempted is how a refused `DELETE` — a
+        // foreign key, in the case that found this — reached the user as
+        // "Deleted from this device" over a message still on screen.
+        bool deleted = false;
+        try {
+          deleted = await onDelete?.call() ?? false;
+        } on Object {
+          deleted = false;
+        }
+        if (!context.mounted) {
+          return;
+        }
+        _toast(context, deleted ? l10n.messageDeleted : l10n.messageDeleteFailed);
     }
   }
 }
@@ -314,7 +377,7 @@ class _Footer extends StatelessWidget {
   final Message message;
   final bool mine;
   final Color color;
-  final VoidCallback onRetry;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -361,7 +424,7 @@ class _StatusIcon extends StatelessWidget {
   final MessageStatus status;
   final Color color;
   final Color failedColor;
-  final VoidCallback onRetry;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -382,7 +445,9 @@ class _StatusIcon extends StatelessWidget {
         ),
       // The only state that asks for something. Tapping it is the whole retry
       // affordance — an icon a user can see and press, rather than a hidden
-      // gesture on the bubble (§6.3).
+      // gesture on the bubble (§6.3). With no [onRetry] the ink well is drawn
+      // disabled, which is the icon without the tap: no splash, no hover, and
+      // nothing to focus on a keyboard.
       MessageStatus.failed => InkWell(
           onTap: onRetry,
           customBorder: const CircleBorder(),

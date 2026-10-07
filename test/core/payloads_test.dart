@@ -1,4 +1,5 @@
 import 'package:feijian/core/constants.dart';
+import 'package:feijian/core/models/manifest_entry.dart';
 import 'package:feijian/core/models/peer.dart';
 import 'package:feijian/core/protocol/frame_codec.dart';
 import 'package:feijian/core/protocol/payloads.dart';
@@ -445,6 +446,8 @@ void main() {
       expect(header.containsKey('isDir'), isFalse);
       expect(header.containsKey('sha256'), isFalse);
       expect(header.containsKey('mtime'), isFalse);
+      expect(header.containsKey('files'), isFalse);
+      expect(header.containsKey('fileCount'), isFalse);
     });
 
     test('rejects a missing or empty xferId', () {
@@ -531,7 +534,11 @@ void main() {
         name: 'photos',
         totalSize: 0,
         isDir: true,
+        files: const <ManifestEntry>[
+          ManifestEntry(relPath: 'a.txt', size: 1),
+        ],
       ).toFrame());
+      expect(real.isSuccess, isTrue, reason: real.reason);
       expect(real.value!.isDir, isTrue);
     });
 
@@ -544,6 +551,272 @@ void main() {
       );
       expect(decoded.isSuccess, isTrue);
       expect(decoded.value!.name, 'holiday.jpg');
+    });
+  });
+
+  group('a folder offer (design.md §4.6)', () {
+    /// A folder offer whose manifest is [files].
+    FileOfferPayload folder(List<ManifestEntry> files) => FileOfferPayload(
+          xferId: 'xfer-1',
+          name: 'photos',
+          totalSize: files.fold(
+            0,
+            (int sum, ManifestEntry e) => sum + e.size,
+          ),
+          isDir: true,
+          files: files,
+        );
+
+    /// The folder offer frame with one field replaced or removed.
+    Frame folderFrameWith(String key, Object? value) {
+      final Map<String, Object?> header = <String, Object?>{
+        ...folder(const <ManifestEntry>[
+          ManifestEntry(relPath: 'a.txt', size: 3),
+        ]).toFrame().header,
+      };
+      if (value == null) {
+        header.remove(key);
+      } else {
+        header[key] = value;
+      }
+      return Frame(header);
+    }
+
+    test('round-trips a manifest', () {
+      final FileOfferPayload original = folder(const <ManifestEntry>[
+        ManifestEntry(relPath: 'a.txt', size: 3, mtime: 1700000000000),
+        ManifestEntry(relPath: 'sub', size: 0, isDir: true),
+        ManifestEntry(relPath: 'sub/b.jpg', size: 90),
+      ]);
+
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(original.toFrame());
+
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      final FileOfferPayload offer = decoded.value!;
+      expect(offer.isDir, isTrue);
+      expect(offer.name, 'photos');
+      expect(offer.totalSize, 93);
+      expect(
+        offer.files.map((ManifestEntry e) => e.relPath),
+        <String>['a.txt', 'sub', 'sub/b.jpg'],
+      );
+      expect(offer.files[0].mtime, 1700000000000);
+      expect(offer.files[1].isDir, isTrue);
+      expect(offer.files[1].size, 0);
+      expect(offer.files[2].isDir, isFalse);
+    });
+
+    test('fileCount counts files and not directories', () {
+      // A folder of empty directories honestly has no files in it, and the UI
+      // says "3 files" about the same number a user would count.
+      final FileOfferPayload offer = folder(const <ManifestEntry>[
+        ManifestEntry(relPath: 'a', size: 0, isDir: true),
+        ManifestEntry(relPath: 'a/b.txt', size: 1),
+        ManifestEntry(relPath: 'a/c.txt', size: 1),
+      ]);
+
+      expect(offer.fileCount, 2);
+      expect(offer.toFrame().header['fileCount'], 2);
+    });
+
+    test('an empty folder round-trips', () {
+      // An empty folder is a real thing to send, and it is the case that tells
+      // "manifest I can read" apart from "no manifest at all" — both are lists
+      // of zero entries once parsed, so the key's presence is the difference.
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folder(const <ManifestEntry>[]).toFrame());
+
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      expect(decoded.value!.isDir, isTrue);
+      expect(decoded.value!.files, isEmpty);
+      expect(decoded.value!.fileCount, 0);
+      expect(decoded.value!.toFrame().header.containsKey('files'), isTrue);
+    });
+
+    test('a folder offer carrying no manifest is refused', () {
+      // §4.6 rule 5 leaves the door open to sending the manifest on a connection
+      // of its own later. A frame from that future build has to be *refused*
+      // here, not parsed into an empty folder: parsed, this build would accept
+      // an offer, wait for files that are coming on a connection it will not
+      // claim, and leave the user watching a transfer that never starts.
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folderFrameWith('files', null));
+      expect(decoded.isSuccess, isFalse);
+      expect(decoded.reason, contains('files'));
+    });
+
+    test('a manifest that is not a list is refused', () {
+      for (final Object? bad in <Object?>['a.txt', 7, <String, Object?>{}]) {
+        expect(
+          FileOfferPayload.from(folderFrameWith('files', bad)).isSuccess,
+          isFalse,
+          reason: 'files=$bad must be refused',
+        );
+      }
+    });
+
+    test('an entry that is not an object is refused', () {
+      expect(
+        FileOfferPayload.from(folderFrameWith('files', <Object?>['a.txt']))
+            .isSuccess,
+        isFalse,
+      );
+    });
+
+    test('an entry with no usable relPath is refused', () {
+      for (final Object? bad in <Object?>[null, '', 7]) {
+        expect(
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+            <String, Object?>{'relPath': bad, 'size': 1},
+          ])).isSuccess,
+          isFalse,
+          reason: 'relPath=$bad must be refused',
+        );
+      }
+    });
+
+    test('an entry whose relPath is over the limit is refused', () {
+      expect(
+        FileOfferPayload.from(folderFrameWith('files', <Object?>[
+          <String, Object?>{'relPath': 'x' * (kMaxRelPathLength + 1), 'size': 1},
+        ])).isSuccess,
+        isFalse,
+      );
+    });
+
+    test('an entry size has no safe default, so it is refused rather than '
+        'guessed', () {
+      for (final Object? bad in <Object?>[null, -1, '12', 1.5]) {
+        expect(
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+            <String, Object?>{'relPath': 'a.txt', 'size': bad},
+          ])).isSuccess,
+          isFalse,
+          reason: 'size=$bad must be refused',
+        );
+      }
+    });
+
+    test('an entry with a nonsensical mtime is refused', () {
+      for (final Object? bad in <Object?>[-5, 0, 'now']) {
+        expect(
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+            <String, Object?>{'relPath': 'a.txt', 'size': 1, 'mtime': bad},
+          ])).isSuccess,
+          isFalse,
+          reason: 'mtime=$bad must be refused',
+        );
+      }
+    });
+
+    test('an entry with an absent mtime is fine', () {
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+        <String, Object?>{'relPath': 'a.txt', 'size': 1},
+      ]));
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      expect(decoded.value!.files.single.mtime, isNull);
+    });
+
+    test('an entry isDir is true only for exactly true', () {
+      // The same rule the offer's own `isDir` follows. Refusing the folder over
+      // a value the sender thought was true would lose a transfer that is
+      // otherwise perfectly describable, and the mistake surfaces anyway: a
+      // directory miscalled a file has no bytes to send, and a file that turns
+      // out to have children fails when they are created underneath it.
+      for (final Object? notTrue in <Object?>[null, 'yes', 1, 'true', false]) {
+        final Map<String, Object?> entry = <String, Object?>{
+          'relPath': 'a',
+          'size': 0,
+        };
+        if (notTrue != null) {
+          entry['isDir'] = notTrue;
+        }
+        final PayloadDecode<FileOfferPayload> decoded =
+            FileOfferPayload.from(
+          folderFrameWith('files', <Object?>[entry]),
+        );
+        expect(decoded.isSuccess, isTrue,
+            reason: 'isDir=$notTrue: ${decoded.reason}');
+        expect(decoded.value!.files.single.isDir, isFalse,
+            reason: 'isDir=$notTrue');
+      }
+
+      final PayloadDecode<FileOfferPayload> real =
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+        <String, Object?>{'relPath': 'a', 'size': 0, 'isDir': true},
+      ]));
+      expect(real.value!.files.single.isDir, isTrue);
+    });
+
+    test('a manifest over the byte ceiling is refused', () {
+      // §4.6 rule 5's limit, enforced on the receiving side too: a peer is
+      // welcome to offer a folder and not welcome to spend a megabyte of header
+      // describing it.
+      final List<Object?> huge = <Object?>[
+        for (int i = 0; i < 20000; i++)
+          <String, Object?>{
+            'relPath': 'file-number-$i-with-a-fairly-long-name.txt',
+            'size': 1,
+          },
+      ];
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folderFrameWith('files', huge));
+
+      expect(decoded.isSuccess, isFalse);
+      expect(decoded.reason, contains('limit'));
+    });
+
+    test('a relPath is carried as the peer wrote it', () {
+      // Not sanitised here. `SafeName` is the receiver's, and it runs where the
+      // path meets the file system — a parser that quietly rewrote paths would
+      // leave the session comparing one string against another it had already
+      // changed.
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+        <String, Object?>{'relPath': '../../etc/shadow', 'size': 1},
+      ]));
+
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      expect(decoded.value!.files.single.relPath, '../../etc/shadow');
+    });
+
+    test('an unknown key inside an entry does not break the offer', () {
+      final PayloadDecode<FileOfferPayload> decoded =
+          FileOfferPayload.from(folderFrameWith('files', <Object?>[
+        <String, Object?>{
+          'relPath': 'a.txt',
+          'size': 1,
+          'compression': 'zstd',
+        },
+      ]));
+
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      expect(decoded.value!.files.single.relPath, 'a.txt');
+    });
+
+    test('a plain file offer ignores a manifest that should not be there', () {
+      // `files` on a non-folder is a broken sender. The frame is still a valid
+      // offer for the file it names, and refusing it would turn one odd field
+      // into a lost transfer.
+      final FileOfferPayload plain = FileOfferPayload(
+        xferId: 'xfer-1',
+        name: 'holiday.jpg',
+        totalSize: 4096,
+      );
+      final PayloadDecode<FileOfferPayload> decoded = FileOfferPayload.from(
+        Frame(<String, Object?>{
+          ...plain.toFrame().header,
+          'files': <Object?>[
+            <String, Object?>{'relPath': 'a.txt', 'size': 1},
+          ],
+        }),
+      );
+
+      expect(decoded.isSuccess, isTrue, reason: decoded.reason);
+      expect(decoded.value!.isDir, isFalse);
+      expect(decoded.value!.files, isEmpty);
     });
   });
 
@@ -664,6 +937,54 @@ void main() {
               .isSuccess,
           isFalse,
           reason: 'xferId=$id must be refused',
+        );
+      }
+    });
+
+    test('a single file\'s frames carry no relPath at all', () {
+      // Byte-for-byte what M3 sent, which is what keeps an older peer able to
+      // read them.
+      for (final String type in <String>[
+        FrameType.fileDone,
+        FrameType.fileCancel,
+      ]) {
+        final Frame frame =
+            const TransferRefPayload(xferId: 'xfer-1').toFrame(type);
+        expect(frame.header.containsKey('relPath'), isFalse);
+        expect(TransferRefPayload.from(frame).value!.relPath, isNull);
+      }
+    });
+
+    test('names which file inside a folder it is about', () {
+      for (final String type in <String>[
+        FrameType.fileDone,
+        FrameType.fileCancel,
+      ]) {
+        final Frame frame = const TransferRefPayload(
+          xferId: 'xfer-1',
+          relPath: 'photos/2024/holiday.jpg',
+        ).toFrame(type);
+
+        expect(
+          TransferRefPayload.from(frame).value!.relPath,
+          'photos/2024/holiday.jpg',
+        );
+      }
+    });
+
+    test('refuses a relPath that is empty, not a string, or over the limit', () {
+      for (final Object? bad in <Object?>[
+        '',
+        7,
+        'x' * (kMaxRelPathLength + 1),
+      ]) {
+        expect(
+          TransferRefPayload.from(Frame.of(FrameType.fileDone, <String, Object?>{
+            'xferId': 'xfer-1',
+            'relPath': bad,
+          })).isSuccess,
+          isFalse,
+          reason: 'relPath=$bad must be refused',
         );
       }
     });

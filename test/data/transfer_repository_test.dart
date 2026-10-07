@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:feijian/core/models/manifest_entry.dart';
 import 'package:feijian/core/models/message.dart';
 import 'package:feijian/core/models/transfer.dart';
 import 'package:feijian/data/dao/message_dao.dart';
@@ -5,6 +8,10 @@ import 'package:feijian/data/database.dart';
 import 'package:feijian/data/repository/chat_repository.dart';
 import 'package:feijian/data/repository/transfer_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
+// For `Value` and `TransfersCompanion`, and only in the one test that writes a
+// second attempt at a folder by hand: no shipped path produces two rows for one
+// message yet, so this is the only way to ask the read path which one it picks.
+import 'package:drift/drift.dart' show Value;
 
 /// What a file transfer writes, and — just as importantly — what it does not.
 ///
@@ -343,13 +350,69 @@ void main() {
 
       final List<Transfer> unfinished = await transfers.unfinished();
 
-      // `pending`, `offered` and `transferring` are all "in flight"; `done` and
-      // `failed` are not, and must survive the sweep untouched.
+      // `offered` and `transferring` are attempts that were interrupted;
+      // `done` and `failed` ended on their own and must survive untouched.
       expect(
         unfinished.map((Transfer t) => t.id),
-        containsAll(<String>['xfer-running', 'xfer-offered', 'xfer-pending']),
+        containsAll(<String>['xfer-running', 'xfer-offered']),
       );
-      expect(unfinished, hasLength(3));
+      expect(unfinished, hasLength(2));
+    });
+
+    test('leaves a transfer the peer was never asked about alone', () async {
+      // §5.2 rule 5: `pending` is not an attempt that died, it is a debt. A
+      // file dropped on a phone that was away is still there to be offered
+      // after a restart, and sweeping it would be this app forgetting a promise
+      // it can still keep.
+      await outgoing(xferId: 'xfer-owed', now: at(1));
+
+      expect(await transfers.unfinished(), isEmpty);
+      expect(
+        (await transfers.owedOutgoing('peer-1')).map((Transfer t) => t.id),
+        <String>['xfer-owed'],
+      );
+    });
+  });
+
+  group('what is owed (§5.2 rule 5)', () {
+    test('is read off the message, not off the transfer', () async {
+      // A deliberately backwards clock: `updated_at` says the second transfer
+      // is the older one, and §5.2.1 says `created_at` is what orders a
+      // conversation. The queue is drained in the order the user wrote it in,
+      // so it reads the message.
+      await outgoing(xferId: 'xfer-first', now: at(9));
+      await outgoing(xferId: 'xfer-second', now: at(2));
+
+      final List<Transfer> owed = await transfers.owedOutgoing('peer-1');
+      expect(
+        owed.map((Transfer t) => t.id),
+        <String>['xfer-first', 'xfer-second'],
+      );
+    });
+
+    test('is emptied one transfer at a time, as each offer goes out', () async {
+      await outgoing(xferId: 'xfer-offered', now: at(1));
+      await outgoing(xferId: 'xfer-owed', now: at(2));
+
+      await transfers.markOffered('xfer-offered', now: at(3));
+
+      expect(
+        (await transfers.owedOutgoing('peer-1')).map((Transfer t) => t.id),
+        <String>['xfer-owed'],
+      );
+    });
+
+    test('holds nothing for a peer that is not the one being asked', () async {
+      await outgoing(xferId: 'xfer-here', peerId: 'peer-1', now: at(1));
+      await outgoing(xferId: 'xfer-elsewhere', peerId: 'peer-2', now: at(2));
+      // An offer that has arrived is the other direction, and is never owed:
+      // it is waiting for *us*.
+      await incoming(xferId: 'xfer-incoming', now: at(3));
+
+      expect(
+        (await transfers.owedOutgoing('peer-1')).map((Transfer t) => t.id),
+        <String>['xfer-here'],
+      );
     });
   });
 
@@ -391,13 +454,13 @@ void main() {
       final Transfer first = await outgoing(xferId: 'x1', fileName: 'a.jpg');
       final Transfer second = await incoming(xferId: 'x2', fileName: 'b.pdf');
 
-      final Map<String, Attachment> found = await transfers
+      final Map<String, List<Attachment>> found = await transfers
           .attachmentsForMessages(
               <String>[first.messageId!, second.messageId!]);
 
       expect(found, hasLength(2));
-      expect(found[first.messageId]!.fileName, 'a.jpg');
-      expect(found[second.messageId]!.fileName, 'b.pdf');
+      expect(found[first.messageId]!.single.fileName, 'a.jpg');
+      expect(found[second.messageId]!.single.fileName, 'b.pdf');
     });
 
     test('a text message simply is not in the map', () async {
@@ -412,7 +475,7 @@ void main() {
       );
       final Transfer file = await outgoing();
 
-      final Map<String, Attachment> found =
+      final Map<String, List<Attachment>> found =
           await transfers.attachmentsForMessages(
         <String>['text-1', file.messageId!],
       );
@@ -430,12 +493,434 @@ void main() {
         () async {
       final Transfer file = await outgoing();
 
-      final Map<String, Attachment> found =
+      final Map<String, List<Attachment>> found =
           await transfers.attachmentsForMessages(
         <String>['never-happened', file.messageId!],
       );
 
       expect(found.keys, <String>[file.messageId!]);
+    });
+  });
+
+  group('a folder is one message and many attachments', () {
+    /// The manifest a walk would produce, directories included, for a folder
+    /// holding [files] under a subdirectory.
+    List<ManifestEntry> manifest({
+      List<int> sizes = const <int>[10, 20, 30],
+      bool withDirectory = true,
+    }) {
+      return <ManifestEntry>[
+        if (withDirectory)
+          const ManifestEntry(relPath: 'sub', size: 0, isDir: true),
+        for (int i = 0; i < sizes.length; i++)
+          ManifestEntry(relPath: 'sub/f$i.bin', size: sizes[i]),
+      ];
+    }
+
+    Future<Transfer> sendFolder({
+      String xferId = 'xfer-folder',
+      List<ManifestEntry>? entries,
+      String folderName = 'holiday',
+      String folderPath = '/home/me/holiday',
+      DateTime? now,
+    }) {
+      return transfers.beginOutgoingFolder(
+        xferId: xferId,
+        peerId: 'peer-1',
+        folderName: folderName,
+        folderPath: folderPath,
+        entries: entries ?? manifest(),
+        now: now ?? at(0),
+      );
+    }
+
+    Future<Transfer> receiveFolder({
+      String xferId = 'xfer-in-folder',
+      List<ManifestEntry>? entries,
+      DateTime? now,
+    }) {
+      return transfers.beginIncomingFolder(
+        xferId: xferId,
+        peerId: 'peer-1',
+        folderName: 'holiday',
+        entries: entries ?? manifest(),
+        now: now ?? at(0),
+      );
+    }
+
+    test('one message, one attachment per file, one transfer for the task',
+        () async {
+      final Transfer transfer = await sendFolder();
+
+      final Message message = (await chat.page('peer-1')).single;
+      expect(message.type, MessageType.folder);
+      expect(message.id, transfer.messageId);
+
+      final List<Attachment> files =
+          await transfers.attachmentsForMessage(transfer.messageId!);
+      expect(files.map((Attachment a) => a.relPath), <String>[
+        'sub/f0.bin',
+        'sub/f1.bin',
+        'sub/f2.bin',
+      ]);
+      expect(files.map((Attachment a) => a.size), <int>[10, 20, 30]);
+      expect(files.map((Attachment a) => a.fileName), <String>[
+        'f0.bin',
+        'f1.bin',
+        'f2.bin',
+      ]);
+    });
+
+    test('the transfer belongs to the task, not to one of the files', () async {
+      // §4.6 rule 3 gives every file in a folder the same `xferId`, so there is
+      // no one attachment the attempt could name — and that null is also what
+      // tells the two endings apart: `file_done` ends a file, `xfer_done` the
+      // task.
+      final Transfer transfer = await sendFolder();
+
+      expect(transfer.attachmentId, isNull);
+      expect(await transfers.attachmentFor(transfer.id), isNull);
+      expect(transfer.bytesTotal, 60);
+    });
+
+    test('the folder name is the message body', () async {
+      // A single file keeps its name on the attachment. A folder has no
+      // attachment of its own to keep one on, and the receiver needs it: it is
+      // the directory to create under the download root.
+      final Transfer transfer = await sendFolder(folderName: 'holiday');
+
+      final Message message = (await chat.page('peer-1')).single;
+      expect(message.text, 'holiday');
+      expect(message.id, transfer.messageId);
+    });
+
+    test('a single file still has no body at all', () async {
+      await outgoing();
+
+      expect((await chat.page('peer-1')).single.text, isNull);
+    });
+
+    test('directories get no attachment', () async {
+      // They carry no bytes. The receiver rebuilds them from the manifest
+      // itself — §4.6 rule 4 — so a row for one would be a file card for
+      // something that is not a file.
+      final Transfer transfer = await sendFolder();
+
+      final List<Attachment> files =
+          await transfers.attachmentsForMessage(transfer.messageId!);
+      expect(files.map((Attachment a) => a.relPath), isNot(contains('sub')));
+      expect(files, hasLength(3));
+    });
+
+    test('a folder of nothing but empty directories is still a folder',
+        () async {
+      // A real thing to send, and the shape that breaks anything assuming a
+      // message with attachments: there are none here.
+      final Transfer transfer = await sendFolder(
+        entries: const <ManifestEntry>[
+          ManifestEntry(relPath: 'empty', size: 0, isDir: true),
+          ManifestEntry(relPath: 'also/empty', size: 0, isDir: true),
+        ],
+      );
+
+      expect(transfer.bytesTotal, 0);
+      expect(await transfers.attachmentsForMessage(transfer.messageId!),
+          isEmpty);
+      expect((await chat.page('peer-1')).single.type, MessageType.folder);
+    });
+
+    test('the sender records where each file is on this device', () async {
+      final Transfer transfer = await sendFolder(folderPath: '/home/me/holiday');
+
+      final List<Attachment> files =
+          await transfers.attachmentsForMessage(transfer.messageId!);
+      // Built from the folder's path and the entry's relPath, in this
+      // platform's spelling — the relPath is `/`-separated by definition and a
+      // local path is not, on Windows.
+      expect(
+        files.first.localPath,
+        '/home/me/holiday${Platform.pathSeparator}sub'
+        '${Platform.pathSeparator}f0.bin',
+      );
+    });
+
+    test('the receiver records no path until a file lands', () async {
+      // Where a file goes is decided when it is written, by `FolderLayout` under
+      // the download root. A path guessed at offer time would be a prediction
+      // the real one replaces.
+      final Transfer transfer = await receiveFolder();
+
+      final List<Attachment> files =
+          await transfers.attachmentsForMessage(transfer.messageId!);
+      expect(files, hasLength(3));
+      expect(files.every((Attachment a) => a.localPath == null), isTrue);
+      expect(files.every((Attachment a) => a.state == TransferState.offered),
+          isTrue);
+      expect(transfer.state, TransferState.offered);
+    });
+
+    test('a folder in the page brings all of its files, not the last one',
+        () async {
+      // The regression this shape exists for: a map keyed by message id holding
+      // a single attachment keeps whichever row the query returned last, so a
+      // folder of nine files would show one of them and call it the folder.
+      final Transfer folder = await sendFolder();
+      final Transfer plain = await outgoing(xferId: 'x9', fileName: 'a.jpg');
+
+      final Map<String, List<Attachment>> found =
+          await transfers.attachmentsForMessages(
+              <String>[folder.messageId!, plain.messageId!]);
+
+      expect(found[folder.messageId], hasLength(3));
+      expect(found[plain.messageId], hasLength(1));
+    });
+
+    test('a folder reads back in path order, not the order it was written in',
+        () async {
+      // The order comes from the two queries and from nowhere else. A card that
+      // listed a folder's files in whatever order the rows came back would
+      // reshuffle itself between a fresh open and a refresh — and the sender
+      // walks a manifest into sorted order, so the writer's order and the
+      // reader's would agree by accident until the first caller that did not.
+      final Transfer transfer = await sendFolder(
+        entries: const <ManifestEntry>[
+          ManifestEntry(relPath: 'sub/z.bin', size: 1),
+          ManifestEntry(relPath: 'sub/a.bin', size: 2),
+          ManifestEntry(relPath: 'sub/m.bin', size: 3),
+        ],
+      );
+
+      final List<Attachment> files =
+          await transfers.attachmentsForMessage(transfer.messageId!);
+      expect(files.map((Attachment a) => a.fileName),
+          <String>['a.bin', 'm.bin', 'z.bin']);
+
+      final Map<String, List<Attachment>> page = await transfers
+          .attachmentsForMessages(<String>[transfer.messageId!]);
+      expect(page[transfer.messageId]!.map((Attachment a) => a.fileName),
+          <String>['a.bin', 'm.bin', 'z.bin']);
+    });
+
+    test('a folder of empty directories is in the page as no entry at all',
+        () async {
+      final Transfer folder = await sendFolder(
+        entries: const <ManifestEntry>[
+          ManifestEntry(relPath: 'empty', size: 0, isDir: true),
+        ],
+      );
+
+      final Map<String, List<Attachment>> found = await transfers
+          .attachmentsForMessages(<String>[folder.messageId!]);
+
+      // Absent, exactly as a text message is: the lookup that misses and the
+      // lookup that finds nothing are the same answer.
+      expect(found, isEmpty);
+    });
+  });
+
+  group('a folder ends file by file and then all at once', () {
+    List<ManifestEntry> threeFiles = const <ManifestEntry>[
+      ManifestEntry(relPath: 'a.bin', size: 10),
+      ManifestEntry(relPath: 'b.bin', size: 20),
+      ManifestEntry(relPath: 'c.bin', size: 30),
+    ];
+
+    Future<Transfer> folder({String xferId = 'xfer-folder'}) {
+      return transfers.beginIncomingFolder(
+        xferId: xferId,
+        peerId: 'peer-1',
+        folderName: 'holiday',
+        entries: threeFiles,
+        now: at(0),
+      );
+    }
+
+    Future<List<Attachment>> filesOf(Transfer transfer) =>
+        transfers.attachmentsForMessage(transfer.messageId!);
+
+    test('a landed file is marked done and given its path', () async {
+      final Transfer transfer = await folder();
+      final List<Attachment> files = await filesOf(transfer);
+
+      await transfers.finishFile(files[1].id, localPath: '/dl/holiday/b.bin');
+
+      final List<Attachment> after = await filesOf(transfer);
+      expect(after[1].state, TransferState.done);
+      expect(after[1].localPath, '/dl/holiday/b.bin');
+      expect(after[1].progress, 1);
+      // Its siblings are untouched: one file arriving is not the folder
+      // arriving.
+      expect(after[0].state, TransferState.offered);
+      expect(after[2].state, TransferState.offered);
+    });
+
+    test('a finished file has moved all its bytes', () async {
+      final Transfer transfer = await folder();
+      final List<Attachment> files = await filesOf(transfer);
+
+      await transfers.finishFile(files[2].id, localPath: '/dl/c.bin');
+
+      // Read from the row rather than supplied by the caller, so it cannot
+      // disagree with the size the offer was accepted against.
+      expect((await filesOf(transfer))[2].transferred, 30);
+    });
+
+    test('finishing an unknown attachment is quiet', () async {
+      // A `file_done` for a file whose row was cleared with the history.
+      await transfers.finishFile('never-happened', localPath: '/dl/x');
+    });
+
+    test('a folder that fails leaves the files that landed alone', () async {
+      // The one case that matters. A folder whose third file fails has two files
+      // on disk the user can open, and a row saying `failed` is a card that
+      // hides them.
+      final Transfer transfer = await folder();
+      final List<Attachment> files = await filesOf(transfer);
+      await transfers.finishFile(files[0].id, localPath: '/dl/a.bin');
+      await transfers.finishFile(files[1].id, localPath: '/dl/b.bin');
+
+      await transfers.end(transfer.id,
+          state: TransferState.failed, now: at(9));
+
+      final List<Attachment> after = await filesOf(transfer);
+      expect(after[0].state, TransferState.done);
+      expect(after[1].state, TransferState.done);
+      expect(after[2].state, TransferState.failed);
+      // Where the landed files are is still written down.
+      expect(after[0].localPath, '/dl/a.bin');
+    });
+
+    test('a folder that fails before anything lands marks them all', () async {
+      final Transfer transfer = await folder();
+
+      await transfers.end(transfer.id,
+          state: TransferState.cancelled, now: at(9));
+
+      final List<Attachment> after = await filesOf(transfer);
+      expect(
+        after.map((Attachment a) => a.state),
+        everyElement(TransferState.cancelled),
+      );
+      expect(transfer.messageId, isNotNull);
+      expect((await chat.page('peer-1')).single.status, MessageStatus.failed);
+    });
+
+    test('a folder that finishes leaves every file done', () async {
+      final Transfer transfer = await folder();
+      final List<Attachment> files = await filesOf(transfer);
+      for (final Attachment file in files) {
+        await transfers.finishFile(file.id, localPath: '/dl/${file.fileName}');
+      }
+
+      await transfers.finish(transfer.id, now: at(9));
+
+      expect(
+        (await filesOf(transfer)).map((Attachment a) => a.state),
+        everyElement(TransferState.done),
+      );
+      final Transfer after = (await transfers.byId(transfer.id))!;
+      expect(after.state, TransferState.done);
+      expect(after.bytesDone, 60);
+      expect((await chat.page('peer-1')).single.status, MessageStatus.delivered);
+    });
+
+    test('the task behind a folder is found by its message', () async {
+      final Transfer transfer = await folder();
+      // Give it a real byte count, the way the service does on a checkpoint.
+      await transfers.recordProgress(
+        transfer.id,
+        state: TransferState.transferring,
+        bytesDone: 25,
+        now: at(3),
+      );
+
+      final Map<String, Transfer> tasks = await transfers.tasksForMessages(
+        <String>[transfer.messageId!],
+      );
+
+      expect(tasks, hasLength(1));
+      expect(tasks[transfer.messageId]!.id, transfer.id);
+      // The number a folder's card has nowhere else to read: no single
+      // attachment carries the whole task's progress.
+      expect(tasks[transfer.messageId]!.bytesDone, 25);
+      expect(tasks[transfer.messageId]!.bytesTotal, 60);
+    });
+
+    test('a single file is not a task', () async {
+      // Its progress lives on its attachment, and answering here as well would
+      // put the same bytes in two places in the state the chat page holds.
+      final Transfer single = await transfers.beginIncoming(
+        xferId: 'xfer-single',
+        peerId: 'peer-1',
+        fileName: 'report.pdf',
+        totalSize: 100,
+        now: at(0),
+      );
+
+      expect(
+        await transfers.tasksForMessages(<String>[single.messageId!]),
+        isEmpty,
+      );
+    });
+
+    test('the newest attempt at a folder is the one that answers', () async {
+      // A retry writes a second row rather than rewriting the first, so a
+      // message can have more than one task transfer. The card must show the
+      // attempt that is running, not the one that failed.
+      final Transfer first = await folder();
+      const String second = 'xfer-again';
+      await db.into(db.transfers).insert(TransfersCompanion.insert(
+            id: second,
+            peerId: 'peer-1',
+            direction: MessageDirection.incoming.wire,
+            state: TransferState.transferring.wire,
+            bytesTotal: 60,
+            updatedAt: at(30).millisecondsSinceEpoch,
+            messageId: Value<String?>(first.messageId),
+          ));
+
+      final Map<String, Transfer> tasks =
+          await transfers.tasksForMessages(<String>[first.messageId!]);
+
+      expect(tasks[first.messageId!]!.id, second);
+    });
+
+    test('a folder of empty directories still has a task', () async {
+      // The one shape where a message has a task and no attachments at all, so
+      // a card that read the task out of the attachments would find nothing.
+      final Transfer transfer = await transfers.beginIncomingFolder(
+        xferId: 'xfer-empty',
+        peerId: 'peer-1',
+        folderName: 'empty',
+        entries: const <ManifestEntry>[
+          ManifestEntry(relPath: 'a', size: 0, isDir: true),
+        ],
+        now: at(0),
+      );
+
+      expect(
+        await transfers.attachmentsForMessage(transfer.messageId!),
+        isEmpty,
+      );
+      expect(
+        (await transfers.tasksForMessages(<String>[transfer.messageId!]))
+            .keys,
+        <String>[transfer.messageId!],
+      );
+    });
+
+    test('an empty page of messages asks nothing', () async {
+      expect(await transfers.tasksForMessages(const <String>[]), isEmpty);
+    });
+
+    test('an unpublished folder task is swept up at startup', () async {
+      final Transfer transfer = await folder(xferId: 'xfer-running');
+
+      expect(
+        (await transfers.unfinished()).map((Transfer t) => t.id),
+        contains('xfer-running'),
+      );
+      expect(transfer.state, TransferState.offered);
     });
   });
 }

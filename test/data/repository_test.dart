@@ -1,10 +1,13 @@
+import 'package:feijian/core/models/manifest_entry.dart';
 import 'package:feijian/core/models/message.dart';
 import 'package:feijian/core/models/peer.dart';
+import 'package:feijian/core/models/transfer.dart';
 import 'package:feijian/data/dao/message_dao.dart';
 import 'package:feijian/data/database.dart';
 import 'package:feijian/data/repository/chat_repository.dart';
 import 'package:feijian/data/repository/peer_repository.dart';
 import 'package:feijian/data/repository/settings_repository.dart';
+import 'package:feijian/data/repository/transfer_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The repository layer: rows in, domain types out — design.md §5.1, §5.2.
@@ -18,12 +21,14 @@ void main() {
   late PeerRepository peers;
   late ChatRepository chat;
   late SettingsRepository settings;
+  late TransferRepository transfers;
 
   setUp(() {
     db = AppDatabase.memory();
     peers = PeerRepository(db);
     chat = ChatRepository(db);
     settings = SettingsRepository(db);
+    transfers = TransferRepository(db);
   });
 
   tearDown(() => db.close());
@@ -534,6 +539,103 @@ void main() {
 
       expect(await chat.pendingFor('peer-1'), isEmpty);
       expect(await chat.allPending(), isEmpty);
+    });
+  });
+
+  group('deleting a message a transfer points at', () {
+    // §5.1's third foreign-key rule reads 「默认」 and explains it as 「传输任务
+    // 可独立于消息清理」. The SQL default is `NO ACTION`, and with
+    // `PRAGMA foreign_keys = ON` that does not mean "leave the transfer alone" —
+    // it means **refuse the delete**. So every file and image message, which is
+    // to say every message with a transfer behind it, could not be deleted, and
+    // a conversation containing one could not be cleared. The rule the design
+    // wants is `SET NULL`: the transfer keeps its row and lets go of the
+    // pointers, exactly the 「独立于消息清理」 the table promised.
+    Future<Transfer> fileIn(String peerId, {String xferId = 'xfer-1'}) {
+      return transfers.beginOutgoing(
+        xferId: xferId,
+        peerId: peerId,
+        fileName: 'holiday.jpg',
+        totalSize: 4096,
+        mime: 'image/jpeg',
+        localPath: r'C:\photos\holiday.jpg',
+        now: t0,
+      );
+    }
+
+    test('deleting a file message takes it out of the conversation', () async {
+      final Transfer transfer = await fileIn('peer-1');
+
+      expect(
+        await chat.deleteMessage(transfer.messageId!),
+        1,
+        reason: 'the user asked for it to go; a transfer row is not a reason '
+            'to keep it',
+      );
+      expect(await chat.page('peer-1'), isEmpty);
+      expect(await chat.lastMessage('peer-1'), isNull);
+    });
+
+    test('clearing history clears a conversation that has a file in it',
+        () async {
+      await fileIn('peer-1');
+      await chat.saveOutgoing(
+        msgId: 'm-text',
+        peerId: 'peer-1',
+        text: 'and this',
+        now: at(1),
+      );
+
+      expect(await chat.clearHistory('peer-1'), 2);
+      expect(await chat.page('peer-1'), isEmpty);
+      expect(
+        await chat.unreadCount('peer-1'),
+        0,
+        reason: 'the badge counts messages, and there are none',
+      );
+    });
+
+    test('the transfer row survives the message it belonged to', () async {
+      // 「传输任务可独立于消息清理」 is the whole content of the rule, so it
+      // needs a test that fails if someone "simplifies" this to a cascade.
+      final Transfer transfer = await fileIn('peer-1');
+
+      await chat.deleteMessage(transfer.messageId!);
+
+      final List<TransferRow> rows = await db.select(db.transfers).get();
+      expect(rows, hasLength(1));
+      expect(rows.single.id, transfer.id);
+      expect(
+        rows.single.messageId,
+        isNull,
+        reason: 'the message is gone, so the pointer has to be',
+      );
+      expect(
+        rows.single.attachmentId,
+        isNull,
+        reason: 'and the attachment went with it, by §5.1 rule 1',
+      );
+      expect(await db.select(db.attachments).get(), isEmpty);
+    });
+
+    test('a folder message clears like any other', () async {
+      // A folder's transfer has `attachment_id` NULL by design (§5.1.1), so it
+      // only ever exercised the `message_id` half of the constraint — which is
+      // why this bug could hide behind "files work, folders work" for so long.
+      final Transfer folder = await transfers.beginOutgoingFolder(
+        xferId: 'xfer-folder',
+        peerId: 'peer-1',
+        folderName: 'holiday',
+        folderPath: '/home/me/holiday',
+        entries: const <ManifestEntry>[
+          ManifestEntry(relPath: 'a.jpg', size: 10),
+        ],
+        now: t0,
+      );
+
+      expect(await chat.clearHistory('peer-1'), 1);
+      expect(await chat.page('peer-1'), isEmpty);
+      expect(await transfers.byId(folder.id), isNotNull);
     });
   });
 

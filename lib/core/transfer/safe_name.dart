@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../constants.dart';
+
 /// Turns a peer-supplied name into one this device is willing to create.
 ///
 /// Everything here treats the input as hostile. The name arrives in a
@@ -8,10 +10,9 @@ import 'dart:convert';
 /// — and the receiver's only defence is to never let the peer's string reach the
 /// filesystem intact (design.md §4.6).
 ///
-/// Only the final path component survives. A name is not a path: `relPath`, the
-/// field that carries a file's place inside a transferred folder, is a separate
-/// field for exactly this reason, and it needs its own per-segment treatment
-/// (§4.6, M4) rather than being folded into this.
+/// A name is not a path: [fileName] keeps only the final component, and
+/// [segments] gives a folder transfer's `relPath` the same treatment one
+/// component at a time.
 abstract final class SafeName {
   /// Used when nothing usable is left of what the peer sent.
   static const String fallback = 'file';
@@ -64,11 +65,59 @@ abstract final class SafeName {
     // The last component of whatever path syntax the peer used. `C:\Users\x` and
     // `/home/x` and `..\..\x` all reduce to `x`, which is the point: any leading
     // directories, including `..`, are dropped rather than neutralised.
-    String name = raw.split(RegExp(r'[/\\]')).last;
+    return _component(raw.split(RegExp(r'[/\\]')).last);
+  }
 
+  /// The path inside a transferred folder, as one this device will create.
+  ///
+  /// Returns the components rather than a joined string because the two callers
+  /// want different things from them: the row stores `/`-separated text, and the
+  /// file system wants whatever separator the platform uses. Splitting is the
+  /// only place the difference can be honoured, so it is where the answer is
+  /// given.
+  ///
+  /// Null when the peer's string names no place at all, or names one deeper than
+  /// [kMaxPathDepth]. Refusing is deliberate: a path that has to be *flattened*
+  /// to be acceptable would put two of the peer's files on one name, and losing
+  /// a file quietly is worse than refusing the folder where the user can see it.
+  ///
+  /// Unlike [fileName], `.` and `..` are **dropped rather than sanitised**.
+  /// [fileName] would turn either into [fallback] — a file genuinely called
+  /// `file`, which is not at all the same thing as "this segment named no
+  /// place" — and a folder transfer that invented files out of traversal
+  /// attempts would be a worse answer than one that ignored them.
+  static List<String>? segments(String raw) {
+    final List<String> parts = <String>[];
+    for (final String segment in raw.split(RegExp(r'[/\\]'))) {
+      if (segment.isEmpty || segment == '.' || segment == '..') {
+        continue;
+      }
+      parts.add(_component(segment));
+      if (parts.length > kMaxPathDepth) {
+        return null;
+      }
+    }
+    if (parts.isEmpty) {
+      return null;
+    }
+    if (utf8.encode(parts.join('/')).length > kMaxRelPathLength) {
+      return null;
+    }
+    return List<String>.unmodifiable(parts);
+  }
+
+  /// [segments] as the `/`-separated text a row stores.
+  ///
+  /// Always `/`, whatever the platform: this value is the peer's file's place
+  /// within the folder and has to mean the same thing on both ends, which is
+  /// exactly what a platform separator cannot promise.
+  static String? relPath(String raw) => segments(raw)?.join('/');
+
+  /// One component, already stripped of anything that would make it a path.
+  static String _component(String raw) {
     // Control characters, and the set Windows refuses to create. `:` matters
     // beyond Windows — it is how `C:evil.txt` becomes an alternate data stream.
-    name = name.replaceAll(RegExp(r'[\x00-\x1f<>:"|?*]'), '');
+    String name = raw.replaceAll(RegExp(r'[\x00-\x1f<>:"|?*]'), '');
 
     // Trailing dots and spaces go because Windows silently strips them on
     // create, so the file on disk would not match the name the user was shown.

@@ -74,10 +74,13 @@ class SettingsPage extends ConsumerWidget {
                 ),
                 onTap: () => _notImplemented(context),
               ),
-              ListTile(
-                title: Text(l10n.settingsAutoAccept),
-                subtitle: Text(_autoAcceptLabel(l10n, settings)),
-                onTap: () => _pickAutoAccept(context, notifier, settings),
+              SwitchListTile(
+                title: Text(l10n.settingsConfirmReceiving),
+                subtitle: Text(l10n.settingsConfirmReceivingHint),
+                value: settings.confirmBeforeReceiving,
+                onChanged: (bool v) => notifier.update(
+                  (AppSettings s) => s.copyWith(confirmBeforeReceiving: v),
+                ),
               ),
             ],
           ),
@@ -182,15 +185,6 @@ class SettingsPage extends ConsumerWidget {
     );
   }
 
-  String _autoAcceptLabel(AppLocalizations l10n, AppSettings settings) {
-    return switch (settings.autoAcceptPolicy) {
-      AutoAcceptPolicy.askEveryTime => l10n.settingsAutoAcceptOff,
-      AutoAcceptPolicy.imagesUnderMb => l10n.settingsAutoAcceptImages(
-        settings.autoAcceptImageMaxMb,
-      ),
-      AutoAcceptPolicy.trustedDevices => l10n.settingsAutoAcceptTrusted,
-    };
-  }
 }
 
 class _Section extends StatelessWidget {
@@ -306,42 +300,6 @@ Future<void> _pickDeviceIcon(
 
   if (picked != null) {
     notifier.update((AppSettings s) => s.copyWith(deviceIcon: picked));
-  }
-}
-
-Future<void> _pickAutoAccept(
-  BuildContext context,
-  SettingsNotifier notifier,
-  AppSettings settings,
-) async {
-  final AppLocalizations l10n = AppLocalizations.of(context);
-  final AutoAcceptPolicy? picked = await showDialog<AutoAcceptPolicy>(
-    context: context,
-    builder: (BuildContext dialogContext) => SimpleDialog(
-      title: Text(l10n.settingsAutoAccept),
-      children: <Widget>[
-        for (final AutoAcceptPolicy policy in AutoAcceptPolicy.values)
-          SimpleDialogOption(
-            onPressed: () => Navigator.of(dialogContext).pop(policy),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Text(
-                switch (policy) {
-                  AutoAcceptPolicy.askEveryTime => l10n.settingsAutoAcceptOff,
-                  AutoAcceptPolicy.imagesUnderMb =>
-                    l10n.settingsAutoAcceptImages(settings.autoAcceptImageMaxMb),
-                  AutoAcceptPolicy.trustedDevices =>
-                    l10n.settingsAutoAcceptTrusted,
-                },
-              ),
-            ),
-          ),
-      ],
-    ),
-  );
-
-  if (picked != null) {
-    notifier.update((AppSettings s) => s.copyWith(autoAcceptPolicy: picked));
   }
 }
 

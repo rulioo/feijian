@@ -99,6 +99,13 @@ class OutgoingFile {
 
   /// Reads the file to the end, sending it as `file_data` frames.
   ///
+  /// [relPath] names which file inside a folder this is, for the only case where
+  /// one `xferId` covers several files (design.md §4.6 rule 3). Every chunk
+  /// carries it, not just the first: the frames of a folder's files share an
+  /// `xferId`, so without it a receiver that had somehow got two of them at once
+  /// could splice one file's bytes into another's, and the result would be a
+  /// file of the right length that neither side ever sent.
+  ///
   /// Returns the offset the receiver now holds, which is [totalSize] unless the
   /// file shrank underneath us. Throws [FileSendException] if the sink stops
   /// accepting — the connection went away, and the caller's job is to mark the
@@ -110,6 +117,7 @@ class OutgoingFile {
   Future<int> pump(
     FrameSink sink, {
     required String xferId,
+    String? relPath,
     void Function(int sent, int total)? onProgress,
   }) async {
     int unflushed = 0;
@@ -130,6 +138,9 @@ class OutgoingFile {
             FrameType.fileData,
             <String, Object?>{
               'xferId': xferId,
+              // Omitted for a single file, whose frames stay byte-for-byte what
+              // M3 sent.
+              if (relPath != null) 'relPath': relPath,
               'offset': start,
               'eof': _offset >= totalSize,
             },

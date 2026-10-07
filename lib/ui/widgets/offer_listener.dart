@@ -8,16 +8,24 @@ import '../../core/models/transfer.dart';
 import '../../l10n/app_localizations.dart';
 import '../../state/data_providers.dart';
 import '../../state/providers.dart';
+import '../../state/settings_provider.dart';
 import '../../state/transfer_provider.dart';
 import '../../state/transfer_service.dart';
 import '../format.dart';
 
-/// Asks the user about every file offered to this device — design.md §9.2.
+/// Answers the file offers that arrive at this device — design.md §6.4, §9.2.
 ///
-/// Confirmation is the *default*: nothing is received until it is answered, and
-/// nothing is answered on the user's behalf. The settings that relax that —
-/// trusted devices, images under a size — are M5's, and until they exist every
-/// offer comes through here.
+/// Two behaviours, and the setting picks between them. The default is
+/// `confirmBeforeReceiving == false`, and then nothing is asked: an offer is
+/// accepted the moment it arrives. Turning the switch on restores the question
+/// this widget was built around, and nothing is received until it is answered —
+/// nothing is answered on the user's behalf.
+///
+/// The setting is read when the offer arrives rather than watched, so a switch
+/// flipped while an offer is on screen governs the *next* one. The one already
+/// on screen has been seen by the user, and replacing its dialog with a silent
+/// accept because of something they did in Settings would be the surprise the
+/// switch exists to prevent.
 ///
 /// Mounted around the whole shell rather than around the chat page, because an
 /// offer is a thing that arrives while the user is doing something else. The
@@ -67,13 +75,26 @@ class _OfferListenerState extends ConsumerState<OfferListener> {
     });
   }
 
-  /// Puts one offer on screen and acts on the answer.
+  /// Acts on one offer: receives it, or puts it on screen to be answered.
   ///
   /// Offers are not queued. The engine already bounds them — it refuses a
   /// fourth concurrent transfer and tells the sender to try later — so several
   /// at once means a handful of files dropped on the window, and a short stack
   /// the user answers in turn is what that deserves.
   Future<void> _ask(Transfer offer) async {
+    final TransferService? service = _watched;
+    if (service == null) {
+      return;
+    }
+
+    if (!ref.read(settingsProvider).confirmBeforeReceiving) {
+      // The default: receive it and say nothing. No toast either — "Accept" is
+      // the word for a button the user pressed, and the conversation bubble
+      // and its progress card are the receipt they actually get.
+      await service.accept(offer.id);
+      return;
+    }
+
     // The name and the size are on the attachment, which is written before the
     // offer is announced — the bubble and this dialog read the same row, so
     // they cannot disagree about what is being offered.
@@ -96,8 +117,11 @@ class _OfferListenerState extends ConsumerState<OfferListener> {
     if (!mounted) {
       return;
     }
-    final TransferService? service = _watched;
-    if (service == null) {
+    // Read again rather than reused: a dialog is open for as long as the user
+    // takes, and a rebuilt engine in that time would leave `service` pointing
+    // at a disposed one.
+    final TransferService? live = _watched;
+    if (live == null) {
       return;
     }
 
@@ -108,10 +132,10 @@ class _OfferListenerState extends ConsumerState<OfferListener> {
       return;
     }
     if (accepted) {
-      await service.accept(offer.id);
+      await live.accept(offer.id);
       _tell(l10n.fileActionResultAccept);
     } else {
-      await service.decline(offer.id);
+      await live.decline(offer.id);
       _tell(l10n.fileActionResultDecline);
     }
   }
@@ -150,7 +174,8 @@ class _OfferListenerState extends ConsumerState<OfferListener> {
   }
 }
 
-/// The question §9.2 makes the default, on its own so it can be asked for.
+/// The question that is asked when the user has asked to be asked, on its
+/// own so it can be put on screen from where the offer arrives (§6.4).
 ///
 /// Returns true for Accept, false for Decline, and null for a dialog the user
 /// dismissed without deciding — which is not an answer and must not be read as

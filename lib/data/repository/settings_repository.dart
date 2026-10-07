@@ -46,8 +46,8 @@ class SettingsRepository {
     return raw == null ? null : int.tryParse(raw);
   }
 
-  /// Reads a value from a closed set, e.g. `AutoAcceptPolicy` or `DeviceIcon`,
-  /// written by the caller as its `wire` string.
+  /// Reads a value from a closed set, e.g. `DeviceIcon`, written by the caller
+  /// as its `wire` string.
   ///
   /// [parse] returns null for anything it does not recognise, which comes out
   /// the same as the key being absent — an unrecognised value is not worth
@@ -99,8 +99,7 @@ abstract final class SettingKeys {
   static const String displayName = 'display_name';
   static const String deviceIcon = 'device_icon';
   static const String downloadFolder = 'download_folder';
-  static const String autoAcceptPolicy = 'auto_accept_policy';
-  static const String autoAcceptImageMaxMb = 'auto_accept_image_max_mb';
+  static const String confirmBeforeReceiving = 'confirm_before_receiving';
   static const String listenPort = 'listen_port';
   static const String multicastAddress = 'multicast_address';
   static const String notificationsEnabled = 'notifications_enabled';

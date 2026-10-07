@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import '../constants.dart';
+import '../models/manifest_entry.dart';
 import '../models/peer.dart';
 import 'frame_codec.dart';
 
@@ -331,7 +334,10 @@ enum RejectReason {
   /// Too many transfers in flight, or the disk is full.
   busy('busy'),
 
-  /// This build cannot do what was offered — a folder, today.
+  /// This build cannot do what was offered. M4 sends and receives folders, so
+  /// nothing refuses one for being a folder any more; what still ends here is
+  /// §4.6 rule 5's manifest too large to send, refused whole rather than
+  /// half-sent.
   unsupported('unsupported'),
 
   /// The offered file is gone on the sending side, or was never there.
@@ -368,6 +374,7 @@ class FileOfferPayload {
     this.isDir = false,
     this.sha256,
     this.mtime,
+    this.files = const <ManifestEntry>[],
   });
 
   /// Names this transfer for the rest of its life. Every `file_data`,
@@ -384,10 +391,20 @@ class FileOfferPayload {
 
   final String? mime;
 
-  /// A folder offer. This build refuses those — see [RejectReason.unsupported]
-  /// — but the field is parsed so the refusal names what was actually offered
-  /// instead of reporting a malformed frame.
+  /// A folder offer, which carries [files] as well as its own name and total
+  /// size — design.md §4.6 rules 1 and 2.
   final bool isDir;
+
+  /// What is inside the folder, in the order the sender means to send it.
+  ///
+  /// Empty for a plain file offer, and for a folder it is the whole transfer's
+  /// description: the receiver builds every attachment row it will need from
+  /// this list before it answers, so that accepting is a promise it can keep.
+  ///
+  /// The directories are in here too. An empty directory produces no file
+  /// entries, so if §4.6 rule 4's "空目录也要创建" is to be kept there has to be
+  /// an entry that says it exists.
+  final List<ManifestEntry> files;
 
   /// Hex digest of the file, when the sender chose to compute one.
   final String? sha256;
@@ -396,6 +413,16 @@ class FileOfferPayload {
   /// can tell an interrupted transfer of *this* file from a different file that
   /// shares its name. Advisory, like every other timestamp off the wire.
   final int? mtime;
+
+  /// How many of [files] are files rather than directories.
+  ///
+  /// Computed, not read. The header carries a `fileCount` and [toFrame] writes
+  /// one, because §4.3 names the field and a peer is entitled to it — but a
+  /// second count that can disagree with the manifest is a second answer to the
+  /// same question, and nothing in this build has a use for a number it would
+  /// first have to reconcile.
+  int get fileCount =>
+      files.where((ManifestEntry entry) => !entry.isDir).length;
 
   Frame toFrame() {
     return Frame.of(FrameType.fileOffer, <String, Object?>{
@@ -409,6 +436,15 @@ class FileOfferPayload {
       if (isDir) 'isDir': true,
       if (sha256 != null) 'sha256': sha256,
       if (mtime != null) 'mtime': mtime,
+      // Written whenever this is a folder, **including when it is empty**. The
+      // key's presence is how a receiver tells "a folder whose manifest I can
+      // read" from "a folder offer carrying no manifest at all", and an empty
+      // folder is a perfectly ordinary thing to send.
+      if (isDir) 'fileCount': fileCount,
+      if (isDir)
+        'files': <Map<String, Object?>>[
+          for (final ManifestEntry entry in files) entry.toJson(),
+        ],
     });
   }
 
@@ -437,21 +473,114 @@ class FileOfferPayload {
       );
     }
 
+    // Anything not exactly `true` is a plain file. A peer that writes
+    // `"isDir": "yes"` means "something I thought was true", and treating
+    // that as a folder would refuse an ordinary file transfer.
+    final bool isDir = frame.header['isDir'] == true;
+
+    List<ManifestEntry> files = const <ManifestEntry>[];
+    if (isDir) {
+      final PayloadDecode<List<ManifestEntry>> manifest = _manifest(frame);
+      if (!manifest.isSuccess) {
+        return PayloadDecode<FileOfferPayload>.failure(manifest.reason!);
+      }
+      files = manifest.value!;
+    }
+
     return PayloadDecode<FileOfferPayload>.success(
       FileOfferPayload(
         xferId: xferId.value!,
         name: name,
         totalSize: totalSize,
         mime: _bounded(frame, 'mime', kMaxMimeLength),
-        // Anything not exactly `true` is a plain file. A peer that writes
-        // `"isDir": "yes"` means "something I thought was true", and treating
-        // that as a folder would refuse an ordinary file transfer.
-        isDir: frame.header['isDir'] == true,
+        isDir: isDir,
         sha256: _digest(frame, 'sha256'),
         mtime: _positive(frame, 'mtime'),
+        files: files,
       ),
     );
   }
+}
+
+/// Reads a folder's manifest — design.md §4.3's `files`.
+///
+/// Strict where the optional display fields are not, because nothing here is
+/// display-only: a `relPath` is where a file will be created and a `size` is how
+/// many bytes will be written to it. An entry this build cannot make sense of
+/// fails the whole offer rather than being dropped, for the reason §4.6 rule 5
+/// gives about a truncated manifest — a folder that arrives looking complete
+/// while missing files is worse than one that does not arrive at all.
+///
+/// The byte ceiling is checked on the encoded list before any entry is parsed,
+/// which is where §4.6 rule 5's 256 KB lives for a receiver: a peer is welcome
+/// to offer a folder, and not welcome to spend a megabyte of header doing it.
+PayloadDecode<List<ManifestEntry>> _manifest(Frame frame) {
+  final Object? raw = frame.header['files'];
+  if (raw is! List) {
+    // Absent or the wrong shape. A folder offer has to carry a manifest: there
+    // is nothing else in the frame that says what is inside the folder.
+    return const PayloadDecode<List<ManifestEntry>>.failure('missing "files"');
+  }
+
+  final int bytes = utf8.encode(jsonEncode(raw)).length;
+  if (bytes > kMaxManifestBytes) {
+    return PayloadDecode<List<ManifestEntry>>.failure(
+      '"files" is $bytes bytes, over the $kMaxManifestBytes byte limit',
+    );
+  }
+
+  final List<ManifestEntry> entries = <ManifestEntry>[];
+  for (final Object? item in raw) {
+    if (item is! Map) {
+      return const PayloadDecode<List<ManifestEntry>>.failure(
+        'a manifest entry is not an object',
+      );
+    }
+
+    final Object? relPath = item['relPath'];
+    if (relPath is! String || relPath.isEmpty) {
+      return const PayloadDecode<List<ManifestEntry>>.failure(
+        'a manifest entry has no "relPath"',
+      );
+    }
+    if (utf8.encode(relPath).length > kMaxRelPathLength) {
+      return const PayloadDecode<List<ManifestEntry>>.failure(
+        'a manifest "relPath" is too long',
+      );
+    }
+
+    final Object? size = item['size'];
+    if (size is! int || size < 0) {
+      return const PayloadDecode<List<ManifestEntry>>.failure(
+        'a manifest "size" must be a non-negative int',
+      );
+    }
+
+    final Object? mtime = item['mtime'];
+    if (mtime != null && (mtime is! int || mtime <= 0)) {
+      return const PayloadDecode<List<ManifestEntry>>.failure(
+        'a manifest "mtime" must be a positive int',
+      );
+    }
+
+    // Anything not exactly `true` is a file, the same rule the offer's own
+    // `isDir` follows and for the same reason: a peer that writes
+    // `"isDir": "yes"` means "something I thought was true", and refusing the
+    // whole folder over it loses a transfer that is otherwise perfectly
+    // describable. The mistake still surfaces — a sender that called a
+    // directory a file sends no bytes for it, and a file that turns out to have
+    // children fails when the receiver tries to create them underneath.
+    entries.add(ManifestEntry(
+      relPath: relPath,
+      size: size,
+      mtime: mtime as int?,
+      isDir: item['isDir'] == true,
+    ));
+  }
+
+  return PayloadDecode<List<ManifestEntry>>.success(
+    List<ManifestEntry>.unmodifiable(entries),
+  );
 }
 
 /// `file_accept` — the receiver agreeing to a `file_offer` — design.md §4.3.
@@ -542,20 +671,48 @@ class FileRejectPayload {
 /// the offered size. A second parser here would be a second answer to the same
 /// question.
 class TransferRefPayload {
-  const TransferRefPayload({required this.xferId});
+  const TransferRefPayload({required this.xferId, this.relPath});
 
   final String xferId;
 
-  Frame toFrame(String type) =>
-      Frame.of(type, <String, Object?>{'xferId': xferId});
+  /// Which file inside a folder this is about.
+  ///
+  /// §4.6 rule 3 gives every file in a folder its own data connection, so "this
+  /// one landed" and "stop this one" both have to name one: a `file_done` that
+  /// said only `xferId` would be a receipt for a folder, and the sender — which
+  /// is waiting before it opens the *next* file's connection — would have no way
+  /// to tell a receipt for the file it just sent from a stray one.
+  ///
+  /// Null for a transfer that is a single file, which is not inside anything.
+  final String? relPath;
+
+  Frame toFrame(String type) => Frame.of(type, <String, Object?>{
+        'xferId': xferId,
+        // Omitted rather than written as null, like every other optional field
+        // here: a single-file transfer's frames are byte-for-byte the ones M3
+        // sent, which is what keeps an older peer able to read them.
+        if (relPath != null) 'relPath': relPath,
+      });
 
   static PayloadDecode<TransferRefPayload> from(Frame frame) {
     final PayloadDecode<String> xferId = _xferId(frame);
     if (!xferId.isSuccess) {
       return PayloadDecode<TransferRefPayload>.failure(xferId.reason!);
     }
+
+    final Object? relPath = frame.header['relPath'];
+    if (relPath != null) {
+      if (relPath is! String ||
+          relPath.isEmpty ||
+          utf8.encode(relPath).length > kMaxRelPathLength) {
+        return const PayloadDecode<TransferRefPayload>.failure(
+          '"relPath" must be a non-empty string within the limit',
+        );
+      }
+    }
+
     return PayloadDecode<TransferRefPayload>.success(
-      TransferRefPayload(xferId: xferId.value!),
+      TransferRefPayload(xferId: xferId.value!, relPath: relPath as String?),
     );
   }
 }

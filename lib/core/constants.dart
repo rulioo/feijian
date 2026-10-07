@@ -174,6 +174,34 @@ const int kMaxXferIdLength = 64;
 /// in the frame header, so without a cap one peer could put a megabyte there.
 const int kMaxFileNameLength = 512;
 
+/// How many directory levels a folder transfer may nest.
+///
+/// Deeper than any folder a person sends, and low enough that a hostile peer
+/// cannot make the receiver build a directory tree that costs more to create —
+/// and to remove again — than the transfer is worth. A path that goes deeper
+/// refuses the whole offer rather than being flattened, because flattening
+/// collapses two files onto one name, which is silent data loss (design.md §4.6).
+const int kMaxPathDepth = 32;
+
+/// Longest accepted `relPath` in a folder transfer, in UTF-8 bytes.
+///
+/// The manifest has its own byte ceiling (§4.6 rule 5), but a single path that
+/// spent the whole of it would be a receiver creating nested directories until
+/// the file system refused — and on Windows that refusal comes from MAX_PATH,
+/// long after the offer was accepted.
+const int kMaxRelPathLength = 1024;
+
+/// Ceiling on a folder's manifest, in UTF-8 bytes of its JSON — design.md §4.6
+/// rule 5.
+///
+/// The manifest travels in one `file_offer` header, so it is bounded by
+/// [kMaxFrameHeader] whether anyone likes it or not; this is the bound the user
+/// is told about. Past it the sender refuses to offer the folder at all and says
+/// why, rather than sending a manifest that describes some of the folder —
+/// a transfer that arrives looking complete while quietly missing files is the
+/// worst of the three possible answers.
+const int kMaxManifestBytes = 256 * 1024;
+
 /// Longest accepted MIME type. A type string is a few dozen characters; the
 /// headroom is for parameters (`text/plain; charset=utf-8`).
 const int kMaxMimeLength = 255;
@@ -257,4 +285,4 @@ const Duration kFrameMaxClockSkew = Duration(days: 3650);
 /// Hand-maintained: keep in sync with `version:` in pubspec.yaml. Reading it at
 /// runtime would mean pulling in package_info_plus, which is not worth a
 /// dependency just for an About row.
-const String kAppVersion = '1.0.0';
+const String kAppVersion = '1.0.5';

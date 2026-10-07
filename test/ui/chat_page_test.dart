@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:feijian/core/discovery/peer_source.dart';
+import 'package:feijian/core/models/manifest_entry.dart';
 import 'package:feijian/core/models/message.dart';
 import 'package:feijian/core/models/peer.dart';
 import 'package:feijian/core/models/transfer.dart';
@@ -23,6 +24,7 @@ import 'package:feijian/state/transfer_service.dart';
 import 'package:feijian/ui/pages/chat_page.dart';
 import 'package:feijian/ui/widgets/attachment_card.dart';
 import 'package:feijian/ui/widgets/attachment_image.dart';
+import 'package:feijian/ui/widgets/folder_card.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -56,7 +58,7 @@ void main() {
   late PeerRepository peers;
   late _NoPeers discovery;
   late LanService service;
-  late TransferService transfers;
+  late _SpyTransfers transfers;
 
   /// Where the files these tests send actually live.
   ///
@@ -100,7 +102,7 @@ void main() {
     // 40% forever — but it would rewrite every row these tests seed, and the
     // states being tested here are the ones a *live* transfer is in.
     // `state/transfer_service_test.dart` covers the sweep against real rows.
-    transfers = TransferService(
+    transfers = _SpyTransfers(
       manager: service.manager,
       transfers: TransferRepository(db),
       downloadDirectory: () async => Directory.systemTemp,
@@ -145,8 +147,19 @@ void main() {
   /// [offers] is how many files the page is about to hand over. They go one at a
   /// time — the next `sendFile` does not start until the last has returned — so
   /// a drop of two files needs two turns outside the zone, not one long one.
-  Future<void> settleFileWork(WidgetTester tester, {int offers = 1}) async {
-    for (int i = 0; i < offers; i++) {
+  ///
+  /// [rounds] overrides that count for work that is a *chain* rather than a
+  /// step. A folder is one: [TransferService.sendFolder] walks the tree with
+  /// `directory.list` and stats every entry of it before it writes a row, and
+  /// each of those is its own completion on the real event loop — four turns for
+  /// a folder holding a single file, and the folder tests ask for more than that
+  /// so that the number is a margin rather than an exact fit.
+  Future<void> settleFileWork(
+    WidgetTester tester, {
+    int offers = 1,
+    int? rounds,
+  }) async {
+    for (int i = 0; i < (rounds ?? offers); i++) {
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 200)),
@@ -656,6 +669,46 @@ void main() {
     );
   });
 
+  testWidgets('a received picture appears the moment its bytes land', (
+    WidgetTester tester,
+  ) async {
+    // The report, on both platforms: the photo arrived and the bubble kept
+    // showing a file card, and it turned into a photo only later, on some
+    // unrelated refresh. Two halves had to line up and only one did — the
+    // ending writes the path onto the **attachment row** (`TransferRepository
+    // .finish`), while the value the page folds in is the engine's [Transfer],
+    // which has no path field at all. So the row was right and the screen was
+    // stale, and nothing short of a re-read could move the bubble.
+    final Transfer offer = await seedFile('xfer-1', size: 2048, minute: 0);
+    final String landed = makeFile('arrived.png');
+
+    await pumpChat(tester);
+    expect(
+      find.byType(AttachmentCard),
+      findsOneWidget,
+      reason: 'a picture still moving is a card, and this one has not moved',
+    );
+
+    // The ending, as the engine produces it: the row first, then the event.
+    await TransferRepository(db).finish(
+      offer.id,
+      localPath: landed,
+      now: DateTime(2026, 1, 2, 9, 1),
+    );
+    transfers.emitted.add(
+      offer.copyWith(state: TransferState.done, bytesDone: 2048),
+    );
+    await settleFileWork(tester);
+
+    expect(
+      find.byType(AttachmentImage),
+      findsOneWidget,
+      reason: 'the bytes are here and the path is on the row; the bubble is '
+          'what has to catch up',
+    );
+    expect(find.byType(AttachmentCard), findsNothing);
+  });
+
   testWidgets('a conversation of text has no cards in it', (
     WidgetTester tester,
   ) async {
@@ -871,50 +924,467 @@ void main() {
     expect(find.text('two.pdf'), findsOneWidget);
   });
 
-  testWidgets('a picked folder is refused without stopping the rest', (
+  testWidgets('a dropped folder is offered beside the file that came with it', (
     WidgetTester tester,
   ) async {
-    // A directory can be picked and is the one thing a drop is most likely to
-    // carry. It is not sendable in M3, and saying so is the point: the files
-    // alongside it still go.
-    chooser.picked = <String>[
-      scratch.path,
-      makeFile('keep-me.txt'),
-    ];
+    // A drop is the one way a folder arrives without a dialog, and a directory
+    // is what a drop is most likely to carry. It is one message of its own: the
+    // file dropped beside it is not swallowed by it, and does not swallow it.
+    final String file = makeFile('keep-me.txt');
+    chooser.picked = <String>[scratch.path, file];
     await pumpChat(tester);
 
     await tester.tap(find.byIcon(Icons.attach_file));
-    await settleFileWork(tester);
+    await settleFileWork(tester, rounds: 8);
 
-    expect(
-      find.textContaining('Sending a folder is not in this version yet'),
-      findsOneWidget,
-    );
+    expect(find.byType(FolderCard), findsOneWidget);
     expect(
       find.byType(AttachmentCard),
       findsOneWidget,
-      reason: 'the folder was refused; the file beside it still went',
+      reason: 'the folder is its own message; the file beside it still went',
     );
     expect(find.text('keep-me.txt'), findsOneWidget);
+    expect(
+      find.text('1 file'),
+      findsOneWidget,
+      reason: 'the folder holds the file that was made in it',
+    );
   });
 
-  testWidgets('the folder button says so rather than opening a picker', (
+  testWidgets('the folder button sends the folder the dialog came back with', (
     WidgetTester tester,
   ) async {
+    makeFile('inside.txt');
+    chooser.pickedFolder = scratch.path;
     await pumpChat(tester);
 
     await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
-    await tester.pump();
+    await settleFileWork(tester, rounds: 8);
 
-    expect(
-      find.textContaining('Sending a folder is not in this version yet'),
-      findsOneWidget,
-    );
+    expect(chooser.folderPicks, 1);
     expect(
       chooser.picks,
       0,
-      reason: 'a picker that then refuses would be a worse way to say the same',
+      reason: 'the folder button asks for one directory, not a list of files',
     );
+    expect(find.byType(FolderCard), findsOneWidget);
+    expect(find.byType(AttachmentCard), findsNothing);
+  });
+
+  testWidgets('a folder dialog the user closed sends nothing', (
+    WidgetTester tester,
+  ) async {
+    chooser.pickedFolder = null;
+    await pumpChat(tester);
+
+    await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
+    for (int i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(chooser.folderPicks, 1, reason: 'the dialog was opened');
+    expect(find.byType(FolderCard), findsNothing);
+    expect(
+      find.byType(SnackBar),
+      findsNothing,
+      reason: 'nothing was sent and nothing was asked, so there is nothing to say',
+    );
+  });
+
+  testWidgets('a folder that cannot be read is refused in its own words', (
+    WidgetTester tester,
+  ) async {
+    // §4.6's refusal has a sentence of its own rather than a file-send failure:
+    // the user picked something the walk could not list, which is a different
+    // thing to tell them than "one.txt could not be sent".
+    chooser.pickedFolder = '${scratch.path}${Platform.pathSeparator}gone';
+    await pumpChat(tester);
+
+    await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
+    await settleFileWork(tester, rounds: 8);
+
+    expect(
+      find.textContaining('cannot be read on this device'),
+      findsOneWidget,
+    );
+    expect(find.byType(FolderCard), findsNothing);
+  });
+
+  /// Writes a folder the way the engine does: one message, one attachment per
+  /// file, one task transfer that has no attachment of its own — §4.6's shape,
+  /// and the reason a folder's card reads two sources.
+  ///
+  /// Real rows through the real repository, not a hand-built model: what the
+  /// card draws is what the engine wrote, and a helper that faked the shape
+  /// could agree with the card while disagreeing with the engine.
+  Future<Transfer> seedFolder(
+    String xferId, {
+    String name = 'Photos',
+    List<String> files = const <String>['a.png', 'b.png'],
+    bool mine = false,
+    int minute = 0,
+    int size = 1024,
+    TransferState? state,
+    int bytesDone = 0,
+  }) async {
+    final TransferRepository repo = TransferRepository(db);
+    final DateTime at = DateTime(2026, 1, 2, 9, minute);
+    final List<ManifestEntry> entries = <ManifestEntry>[
+      for (final String file in files)
+        ManifestEntry(
+          relPath: file,
+          size: size,
+          mtime: at.millisecondsSinceEpoch,
+        ),
+    ];
+    final Transfer transfer = mine
+        ? await repo.beginOutgoingFolder(
+            xferId: xferId,
+            peerId: bob.id,
+            folderName: name,
+            folderPath: scratch.path,
+            entries: entries,
+            now: at,
+          )
+        : await repo.beginIncomingFolder(
+            xferId: xferId,
+            peerId: bob.id,
+            folderName: name,
+            entries: entries,
+            now: at,
+          );
+    if (state != null) {
+      await repo.recordProgress(
+        xferId,
+        state: state,
+        bytesDone: bytesDone,
+        now: at,
+      );
+    }
+    return transfer;
+  }
+
+  /// Marks the first [count] files of [xferId] as landed, where [at] says.
+  Future<void> landFiles(
+    Transfer transfer, {
+    required int count,
+    String directory = r'C:\Downloads\Photos',
+  }) async {
+    final TransferRepository repo = TransferRepository(db);
+    final List<Attachment> rows =
+        await repo.attachmentsForMessage(transfer.messageId!);
+    for (final Attachment row in rows.take(count)) {
+      await repo.finishFile(
+        row.id,
+        localPath: '$directory${Platform.pathSeparator}${row.fileName}',
+      );
+    }
+  }
+
+  testWidgets('a folder message renders as a card with its count and size', (
+    WidgetTester tester,
+  ) async {
+    await seedFolder('xfer-1');
+    await pumpChat(tester);
+
+    expect(find.byType(FolderCard), findsOneWidget);
+    expect(find.text('Photos'), findsOneWidget);
+    expect(
+      find.text('2 files'),
+      findsOneWidget,
+      reason: 'a folder counts rather than names — §6.3',
+    );
+    expect(find.textContaining('2.0 KB'), findsOneWidget);
+    expect(
+      find.text('Waiting for your answer'),
+      findsOneWidget,
+      reason: 'an offered folder is one question about the whole of it',
+    );
+    expect(
+      find.byType(LinearProgressIndicator),
+      findsNothing,
+      reason: 'nothing has been agreed to, so a bar would sit at zero',
+    );
+    // One decision about all of it: §9.2 has no partial accept.
+    expect(find.text('Accept'), findsOneWidget);
+    expect(find.text('Decline'), findsOneWidget);
+    expect(
+      find.text('Cancel'),
+      findsNothing,
+      reason: 'Cancel and Decline would be two words for one decision',
+    );
+    expect(
+      find.byType(AttachmentCard),
+      findsNothing,
+      reason: 'the files are inside the card, not cards of their own',
+    );
+  });
+
+  testWidgets('a folder on the way shows the task progress, not a file\'s', (
+    WidgetTester tester,
+  ) async {
+    // §4.6 gives the whole folder one `xferId`, so the bar is the folder's
+    // fraction. A file's own progress would sit at zero for every file but the
+    // one moving and read as stuck.
+    await seedFolder(
+      'xfer-1',
+      files: const <String>['a.png', 'b.png', 'c.png', 'd.png'],
+      state: TransferState.transferring,
+      bytesDone: 1024,
+    );
+    await pumpChat(tester);
+
+    expect(find.text('25%'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    expect(
+      find.text('Cancel'),
+      findsOneWidget,
+      reason: 'a folder being received has something to stop',
+    );
+  });
+
+  testWidgets('a folder lists the files that landed, each with its own Open', (
+    WidgetTester tester,
+  ) async {
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      files: const <String>['a.png', 'b.png', 'c.png'],
+      state: TransferState.transferring,
+      bytesDone: 2048,
+    );
+    await landFiles(folder, count: 2);
+    await pumpChat(tester);
+
+    // Two arrived, one still coming: the arrived two are reachable by name.
+    expect(find.text('a.png'), findsOneWidget);
+    expect(find.text('b.png'), findsOneWidget);
+    expect(
+      find.text('c.png'),
+      findsNothing,
+      reason: 'a file that has not landed is a name the user cannot act on',
+    );
+    expect(find.byTooltip('Open'), findsNWidgets(2));
+    expect(find.byTooltip('Save as...'), findsNWidgets(2));
+  });
+
+  testWidgets("a folder's files are reachable when its task ends", (
+    WidgetTester tester,
+  ) async {
+    // The same defect as the single-picture one above, one level down: a
+    // folder's task carries the whole folder's bytes, and each file's own path
+    // went onto *its* attachment row as it landed. The task's ending is the
+    // moment the last of those is written, so it is the moment the card can
+    // start offering Open — and the card reads the rows, not the task.
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      files: const <String>['a.png'],
+      state: TransferState.transferring,
+      bytesDone: 512,
+    );
+
+    await pumpChat(tester);
+    expect(
+      find.byTooltip('Open'),
+      findsNothing,
+      reason: 'the page was read before anything landed',
+    );
+
+    await landFiles(folder, count: 1);
+    transfers.emitted.add(
+      folder.copyWith(state: TransferState.done, bytesDone: 1024),
+    );
+    await settleFileWork(tester);
+
+    expect(
+      find.byTooltip('Open'),
+      findsOneWidget,
+      reason: 'the file is on disk and its row says so; the card is what has '
+          'to catch up',
+    );
+  });
+
+  testWidgets('a folder names the first few files and counts the rest', (
+    WidgetTester tester,
+  ) async {
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      files: const <String>[
+        'a.png',
+        'b.png',
+        'c.png',
+        'd.png',
+        'e.png',
+        'f.png',
+        'g.png',
+      ],
+      state: TransferState.transferring,
+      bytesDone: 1024,
+    );
+    await landFiles(folder, count: 7);
+    await pumpChat(tester);
+
+    // A bubble is a bubble: a folder of a thousand files lists the few the user
+    // is most likely to reach for and says how many it did not name. Nothing is
+    // lost by it — they are on disk, and Open is not the only way to them.
+    for (final String name in <String>['a.png', 'b.png', 'c.png', 'd.png', 'e.png']) {
+      expect(find.text(name), findsOneWidget);
+    }
+    expect(find.text('f.png'), findsNothing);
+    expect(find.text('…and 2 more'), findsOneWidget);
+  });
+
+  testWidgets('a folder that lost a file counts it and keeps what landed', (
+    WidgetTester tester,
+  ) async {
+    // A failed *task* keeps its files (§5.1.1), so the card has to say both
+    // things at once: how many did not arrive, and that the rest are here.
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      files: const <String>['a.png', 'b.png', 'c.png', 'd.png'],
+      state: TransferState.transferring,
+      bytesDone: 3072,
+    );
+    await landFiles(folder, count: 3);
+    await TransferRepository(db).end(
+      'xfer-1',
+      state: TransferState.failed,
+      now: DateTime(2026, 1, 2, 9, 1),
+    );
+    await pumpChat(tester);
+
+    expect(
+      find.textContaining('did not arrive'),
+      findsOneWidget,
+      reason: 'the file that did not come is the one worth saying',
+    );
+    expect(find.text('Failed'), findsOneWidget);
+    expect(
+      find.byTooltip('Open'),
+      findsNWidgets(3),
+      reason: 'the three files that made it are still reachable',
+    );
+    expect(
+      find.text('d.png'),
+      findsNothing,
+      reason: 'the file that did not arrive is not a name to offer Open on',
+    );
+  });
+
+  testWidgets('a folder that failed offers no retry', (
+    WidgetTester tester,
+  ) async {
+    // §5.2's retry re-reads the source, and a folder's source is not on any row
+    // the card holds — so a failed folder says what happened and does not
+    // pretend a tap would try again. The alternative is an icon that answers a
+    // press with silence.
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      mine: true,
+      files: const <String>['a.png', 'b.png'],
+      minute: 0,
+    );
+    await TransferRepository(db).end(
+      'xfer-1',
+      state: TransferState.failed,
+      now: DateTime(2026, 1, 2, 9, 1),
+    );
+    expect(folder.id, 'xfer-1');
+    await pumpChat(tester);
+
+    // The sender draws the exclamation for a failed message, folder or not.
+    expect(find.byIcon(Icons.error_outline), findsOneWidget);
+    expect(
+      (await chat.page(bob.id)).single.status,
+      MessageStatus.failed,
+      reason: 'the row really is the one that draws the icon',
+    );
+
+    await tester.tap(find.byIcon(Icons.error_outline));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      (await chat.page(bob.id)).single.status,
+      MessageStatus.failed,
+      reason: 'nothing behind the icon, so the message never left `failed`',
+    );
+  });
+
+  testWidgets('answering a folder reaches the engine by the task id', (
+    WidgetTester tester,
+  ) async {
+    // A folder transfer has no `attachment_id` — §4.6 gives the whole of it one
+    // `xferId` — so `acceptAttachment` cannot find it and the card has to answer
+    // by the task's own id. This is that, and nothing else can witness it: the
+    // engine's map is filled from the wire, and no socket completes in here.
+    await seedFolder('xfer-1');
+    await pumpChat(tester);
+
+    await tester.tap(find.text('Accept'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(transfers.accepted, <String>['xfer-1']);
+    expect(transfers.declined, isEmpty);
+  });
+
+  testWidgets('declining a folder is one answer about all of it', (
+    WidgetTester tester,
+  ) async {
+    await seedFolder('xfer-1');
+    await pumpChat(tester);
+
+    await tester.tap(find.text('Decline'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(transfers.declined, <String>['xfer-1']);
+    expect(
+      transfers.accepted,
+      isEmpty,
+      reason: '§9.2 has no partial accept, and no accept after a decline',
+    );
+  });
+
+  testWidgets('cancelling a folder being received stops the task', (
+    WidgetTester tester,
+  ) async {
+    await seedFolder(
+      'xfer-1',
+      files: const <String>['a.png', 'b.png'],
+      state: TransferState.transferring,
+      bytesDone: 512,
+    );
+    await pumpChat(tester);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      transfers.cancelled,
+      <String>['xfer-1'],
+      reason: 'the task, not one of its files — the files behind it stop too',
+    );
+  });
+
+  testWidgets('a folder that has arrived offers no buttons at all', (
+    WidgetTester tester,
+  ) async {
+    final Transfer folder = await seedFolder(
+      'xfer-1',
+      mine: true,
+      files: const <String>['a.png'],
+    );
+    await TransferRepository(db).finish('xfer-1', now: DateTime(2026, 1, 2, 9, 1));
+    expect(folder.id, 'xfer-1');
+    await pumpChat(tester);
+
+    // Nothing left to stop, and nothing to answer: the card is a name, a count
+    // and, for a file that is really there, the way to open it.
+    expect(find.text('Cancel'), findsNothing);
+    expect(find.text('Accept'), findsNothing);
+    expect(find.text('Decline'), findsNothing);
   });
 
   testWidgets('with no engine up, a picked file is not silently dropped', (
@@ -1062,7 +1532,14 @@ class _FakeChooser implements FileChooser {
   /// Where the save dialog points, or null for a dialog the user closed.
   final String? target;
 
+  /// What the folder dialog comes back with, null for one the user closed.
+  ///
+  /// Separate from [picked] because the folder button asks a different question
+  /// than the paperclip: one directory, not a list of files.
+  String? pickedFolder;
+
   int picks = 0;
+  int folderPicks = 0;
 
   /// Every `(from, to)` the page asked to be copied.
   final List<(String, String)> copies = <(String, String)>[];
@@ -1074,6 +1551,12 @@ class _FakeChooser implements FileChooser {
   }
 
   @override
+  Future<String?> pickFolder() async {
+    folderPicks++;
+    return pickedFolder;
+  }
+
+  @override
   Future<String?> pickSaveLocation(String fileName) async => target;
 
   @override
@@ -1081,6 +1564,78 @@ class _FakeChooser implements FileChooser {
     copies.add((from, to));
     return true;
   }
+}
+
+/// The engine with the three answers a card can give recorded rather than
+/// acted on.
+///
+/// The card's Accept, Decline and Cancel reach the engine by the *task's* id,
+/// which is a thing only this can witness: the maps those calls look in are
+/// filled from the wire, and a widget test runs in a fake-async zone where no
+/// socket completes. Recording the id the page used is the whole assertion.
+class _SpyTransfers extends TransferService {
+  _SpyTransfers({
+    required super.manager,
+    required super.transfers,
+    required super.downloadDirectory,
+  });
+
+  StreamSubscription<Transfer>? _forward;
+
+  final List<String> accepted = <String>[];
+  final List<String> declined = <String>[];
+  final List<String> cancelled = <String>[];
+
+  /// The engine's progress stream, in the test's hands.
+  ///
+  /// Real progress arrives from the wire, and no socket completes in a widget
+  /// test — so a test that needs the page to see a transfer move has to be the
+  /// one moving it. Overriding the getter rather than the service's controller
+  /// keeps that entirely on this side: the page subscribes to `changes` either
+  /// way, and production has no seam it does not need.
+  final StreamController<Transfer> emitted =
+      StreamController<Transfer>.broadcast();
+
+  /// The engine's own stream, **forwarded** rather than replaced.
+  ///
+  /// These tests send real files, and the page has to see those endings too — a
+  /// replacement channel would make every real send look like it never moved.
+  ///
+  /// Attached here, on the page's first read, and not in the constructor. A
+  /// constructor runs in `setUp`, which is **outside** the fake-async zone
+  /// `testWidgets` builds for the body; a subscription taken there delivers its
+  /// events on the real event loop, and each one then waits for `runAsync` to
+  /// turn that loop before the page can see it. That is one extra round per
+  /// emission, which is invisible on a single file and is exactly enough to
+  /// leave the second file of a two-file send unwritten.
+  @override
+  Stream<Transfer> get changes {
+    _forward ??= super.changes.listen(emitted.add);
+    return emitted.stream;
+  }
+
+  @override
+  Future<void> dispose() async {
+    // Not awaited: this subscription belongs to the test's fake-async zone, and
+    // a cancellation future from that zone is not something teardown — which
+    // runs outside it — can wait on.
+    unawaited(_forward?.cancel());
+    await emitted.close();
+    await super.dispose();
+  }
+
+  @override
+  Future<void> accept(String xferId) async => accepted.add(xferId);
+
+  @override
+  Future<void> decline(
+    String xferId, {
+    RejectReason reason = RejectReason.declined,
+  }) async =>
+      declined.add(xferId);
+
+  @override
+  Future<void> cancel(String xferId) async => cancelled.add(xferId);
 }
 
 class _QuietService extends LanService {

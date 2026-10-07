@@ -206,11 +206,23 @@ class Transfers extends Table {
   /// The `xferId` from the wire.
   TextColumn get id => text()();
 
-  TextColumn get messageId =>
-      text().named('message_id').references(Messages, #id).nullable()();
+  /// `SET NULL`, not the default (§5.1 rule 2).
+  ///
+  /// The rule's words are 「传输任务可独立于消息清理」 — clear the history and the
+  /// transfer stays behind. `NO ACTION`, which is what a bare `REFERENCES`
+  /// means, says something quite different once `foreign_keys` is on: it
+  /// **refuses the delete**. Every image and file message has a transfer behind
+  /// it, so the default made exactly those messages undeletable and made
+  /// "clear history" fail on any conversation that had ever carried a file.
+  TextColumn get messageId => text()
+      .named('message_id')
+      .references(Messages, #id, onDelete: KeyAction.setNull)
+      .nullable()();
 
-  TextColumn get attachmentId =>
-      text().named('attachment_id').references(Attachments, #id).nullable()();
+  TextColumn get attachmentId => text()
+      .named('attachment_id')
+      .references(Attachments, #id, onDelete: KeyAction.setNull)
+      .nullable()();
 
   TextColumn get peerId => text().named('peer_id')();
 
@@ -268,7 +280,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.file(File file) : super(NativeDatabase.createInBackground(file));
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -281,6 +293,18 @@ class AppDatabase extends _$AppDatabase {
             'CREATE INDEX idx_message_conv '
             'ON message(conversation_id, created_at DESC)',
           );
+        },
+        onUpgrade: (Migrator m, int from, int to) async {
+          if (from < 2) {
+            // v2 is `transfer.message_id`/`attachment_id` gaining `ON DELETE
+            // SET NULL`. A foreign key action is part of the table definition
+            // and SQLite has no `ALTER` for it, so the only way to change one is
+            // to build the table again and copy the rows across — which is what
+            // `alterTable` does, and why this is one line instead of a
+            // hand-written four-step dance. No column changed, so there is
+            // nothing to transform: every row copies by name.
+            await m.alterTable(TableMigration(transfers));
+          }
         },
         beforeOpen: (OpeningDetails details) async {
           // SQLite has foreign keys OFF by default, and an off switch turns

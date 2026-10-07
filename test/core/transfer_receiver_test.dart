@@ -30,23 +30,33 @@ void main() {
     String xferId = 'x1',
     String name = 'report.pdf',
     required int totalSize,
+    String? relPath,
+    Directory? into,
   }) async {
     final TransferReceiver receiver = await TransferReceiver.begin(
-      directory: dir,
+      directory: into ?? dir,
       xferId: xferId,
       rawName: name,
       totalSize: totalSize,
+      relPath: relPath,
     );
     started.add(receiver);
     return receiver;
   }
 
   /// One `file_data` frame, as the sender would build it.
-  Frame chunk(String xferId, int offset, List<int> bytes, {bool eof = false}) =>
+  Frame chunk(
+    String xferId,
+    int offset,
+    List<int> bytes, {
+    bool eof = false,
+    String? relPath,
+  }) =>
       Frame.of(
           FrameType.fileData,
           <String, Object?>{
             'xferId': xferId,
+            if (relPath != null) 'relPath': relPath,
             'offset': offset,
             'eof': eof,
           },
@@ -326,6 +336,77 @@ void main() {
         ),
         throwsA(isA<FileReceiveException>()),
       );
+    });
+  });
+
+  group('one file of a folder is not another file of it', () {
+    // §4.6 rule 3 gives every file in a folder the same `xferId`, so the check
+    // above lets a sibling's chunks straight through. Without this one they
+    // would be spliced into the file being written — producing a file of the
+    // right length that neither side ever sent, which is exactly the failure the
+    // `xferId` check exists to prevent one level up.
+    test('chunks naming this file are accepted', () async {
+      final TransferReceiver receiver =
+          await begin(totalSize: 6, relPath: 'sub/a.txt');
+
+      await receiver.accept(chunk('x1', 0, <int>[1, 2, 3], relPath: 'sub/a.txt'));
+      await receiver.accept(chunk('x1', 3, <int>[4, 5, 6],
+          eof: true, relPath: 'sub/a.txt'));
+
+      expect(receiver.received, 6);
+    });
+
+    test('a chunk for a sibling is refused', () async {
+      final TransferReceiver receiver =
+          await begin(totalSize: 6, relPath: 'sub/a.txt');
+
+      await expectLater(
+        receiver.accept(chunk('x1', 0, <int>[9, 9, 9], relPath: 'sub/b.txt')),
+        throwsA(isA<FileReceiveException>()),
+      );
+      expect(receiver.received, 0);
+    });
+
+    test('a chunk with no relPath at all is refused', () async {
+      // What a sender that lost track of which file it was on would send, and
+      // the reason the check is equality rather than "if both are present".
+      final TransferReceiver receiver =
+          await begin(totalSize: 6, relPath: 'sub/a.txt');
+
+      await expectLater(
+        receiver.accept(chunk('x1', 0, <int>[1, 2, 3])),
+        throwsA(isA<FileReceiveException>()),
+      );
+    });
+
+    test('a single file refuses a chunk that claims to be in a folder',
+        () async {
+      // The other direction, and the same splice: a plain file transfer has no
+      // folder for a relPath to be inside.
+      final TransferReceiver receiver = await begin(totalSize: 6);
+
+      await expectLater(
+        receiver.accept(chunk('x1', 0, <int>[1, 2, 3], relPath: 'sub/a.txt')),
+        throwsA(isA<FileReceiveException>()),
+      );
+    });
+
+    test('a whole file of a folder still arrives', () async {
+      final Directory sub =
+          Directory('${dir.path}${Platform.pathSeparator}sub')
+            ..createSync(recursive: true);
+      final TransferReceiver receiver = await begin(
+        totalSize: 3,
+        name: 'a.txt',
+        relPath: 'sub/a.txt',
+        into: sub,
+      );
+
+      await receiver.accept(
+          chunk('x1', 0, <int>[7, 8, 9], eof: true, relPath: 'sub/a.txt'));
+      final String path = await receiver.complete();
+
+      expect(File(path).readAsBytesSync(), <int>[7, 8, 9]);
     });
   });
 

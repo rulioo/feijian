@@ -41,6 +41,30 @@ class FileChooser {
     ];
   }
 
+  /// The folder the user picked to send, or null if they cancelled.
+  ///
+  /// One folder rather than several: §4.6's offer describes a single tree, so a
+  /// multi-select would be several offers — and a caller that wants two can ask
+  /// twice.
+  ///
+  /// **A path the picker cannot hand over is answered as a cancelled dialog**,
+  /// which is a lie the caller can act on and the alternative is not. Android's
+  /// tree picker goes through the Storage Access Framework (§7.1), and a tree
+  /// this app has not been granted says so by coming back as `/` — the one
+  /// answer that is never a real choice there and would have the walk try to
+  /// list the whole file system. On Linux `/` is somebody's actual home
+  /// directory's parent, which is why the guard is not shared.
+  Future<String?> pickFolder() async {
+    final String? path = await FilePicker.getDirectoryPath();
+    if (path == null) {
+      return null;
+    }
+    if (Platform.isAndroid && path == '/') {
+      return null;
+    }
+    return path;
+  }
+
   /// Whether a file can be copied to a place the user picks.
   ///
   /// True on the three desktops, false on Android. Not a limitation of this

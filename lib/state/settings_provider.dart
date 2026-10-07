@@ -8,19 +8,6 @@ import '../core/models/peer.dart';
 import '../data/repository/settings_repository.dart';
 import 'data_providers.dart';
 
-/// What to do when a file offer arrives (design.md §6.4).
-enum AutoAcceptPolicy {
-  /// Ask the user every time. The safe default.
-  askEveryTime,
-
-  /// Silently accept images below a size threshold — the common case where a
-  /// confirmation dialog is pure friction.
-  imagesUnderMb,
-
-  /// Accept anything from peers marked trusted.
-  trustedDevices,
-}
-
 /// User-configurable settings, persisted in the `setting` table (design.md
 /// §5.1).
 ///
@@ -32,8 +19,7 @@ class AppSettings {
     this.displayName,
     this.deviceIcon,
     this.downloadFolder,
-    this.autoAcceptPolicy = AutoAcceptPolicy.askEveryTime,
-    this.autoAcceptImageMaxMb = 10,
+    this.confirmBeforeReceiving = false,
     this.listenPort = kDiscoveryPort,
     this.multicastAddress = kMulticastGroup,
     this.notificationsEnabled = true,
@@ -47,8 +33,23 @@ class AppSettings {
   final String? displayName;
   final DeviceIcon? deviceIcon;
   final String? downloadFolder;
-  final AutoAcceptPolicy autoAcceptPolicy;
-  final int autoAcceptImageMaxMb;
+
+  /// Whether an incoming file has to be answered before it is received.
+  ///
+  /// **Off by default**, and the polarity of the name is the whole point of it:
+  /// the app out of the box receives what is sent to it, and the switch is the
+  /// opt-*in* to being asked. The alternative reading — a "receive without
+  /// asking" switch that ships on — is the same setting with the default
+  /// hidden in a double negative, and it is what an earlier draft of this
+  /// screen had: a three-way `AutoAcceptPolicy` whose default was
+  /// `askEveryTime`, the opposite of this.
+  ///
+  /// It is one bit rather than a policy because §9.2's other two answers —
+  /// quiet for images under a size, quiet for trusted devices — need a size row
+  /// and a trust flag that nothing in the product sets yet. A picker offering
+  /// them would be three choices of which two do nothing.
+  final bool confirmBeforeReceiving;
+
   final int listenPort;
   final String multicastAddress;
   final bool notificationsEnabled;
@@ -63,8 +64,7 @@ class AppSettings {
     String? displayName,
     DeviceIcon? deviceIcon,
     String? downloadFolder,
-    AutoAcceptPolicy? autoAcceptPolicy,
-    int? autoAcceptImageMaxMb,
+    bool? confirmBeforeReceiving,
     int? listenPort,
     String? multicastAddress,
     bool? notificationsEnabled,
@@ -77,8 +77,8 @@ class AppSettings {
       displayName: displayName ?? this.displayName,
       deviceIcon: deviceIcon ?? this.deviceIcon,
       downloadFolder: downloadFolder ?? this.downloadFolder,
-      autoAcceptPolicy: autoAcceptPolicy ?? this.autoAcceptPolicy,
-      autoAcceptImageMaxMb: autoAcceptImageMaxMb ?? this.autoAcceptImageMaxMb,
+      confirmBeforeReceiving:
+          confirmBeforeReceiving ?? this.confirmBeforeReceiving,
       listenPort: listenPort ?? this.listenPort,
       multicastAddress: multicastAddress ?? this.multicastAddress,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
@@ -163,8 +163,7 @@ Map<String, String> _encode(AppSettings s) {
     if (s.deviceIcon != null) SettingKeys.deviceIcon: s.deviceIcon!.name,
     if (s.downloadFolder != null)
       SettingKeys.downloadFolder: s.downloadFolder!,
-    SettingKeys.autoAcceptPolicy: s.autoAcceptPolicy.name,
-    SettingKeys.autoAcceptImageMaxMb: '${s.autoAcceptImageMaxMb}',
+    SettingKeys.confirmBeforeReceiving: '${s.confirmBeforeReceiving}',
     SettingKeys.listenPort: '${s.listenPort}',
     SettingKeys.multicastAddress: s.multicastAddress,
     SettingKeys.notificationsEnabled: '${s.notificationsEnabled}',
@@ -185,15 +184,10 @@ AppSettings _decode(Map<String, String> stored) {
       (DeviceIcon i) => i.name,
     ),
     downloadFolder: stored[SettingKeys.downloadFolder],
-    autoAcceptPolicy: _enumByName(
-          AutoAcceptPolicy.values,
-          stored[SettingKeys.autoAcceptPolicy],
-          (AutoAcceptPolicy p) => p.name,
-        ) ??
-        defaults.autoAcceptPolicy,
-    autoAcceptImageMaxMb:
-        int.tryParse(stored[SettingKeys.autoAcceptImageMaxMb] ?? '') ??
-            defaults.autoAcceptImageMaxMb,
+    confirmBeforeReceiving: _bool(
+      stored[SettingKeys.confirmBeforeReceiving],
+      defaults.confirmBeforeReceiving,
+    ),
     listenPort:
         int.tryParse(stored[SettingKeys.listenPort] ?? '') ?? defaults.listenPort,
     multicastAddress:

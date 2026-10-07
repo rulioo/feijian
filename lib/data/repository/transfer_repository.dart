@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/models/manifest_entry.dart';
 import '../../core/models/message.dart';
 import '../../core/models/transfer.dart';
 import '../dao/message_dao.dart';
@@ -16,6 +19,14 @@ import '../database.dart';
 /// rather than the service reaching for three DAOs in sequence: a half-written
 /// transfer is a message bubble with nothing behind it, or a transfer row whose
 /// `file_data` frames have nowhere to land.
+///
+/// A **folder** writes the same four things in the same transaction, with two
+/// differences that come from what a folder is. There is one attachment per
+/// *file* rather than one per message, and there is still only **one** transfer
+/// row — for the task, with `attachment_id` NULL. A folder's files share an
+/// `xferId` (§4.6 rule 3), so no single attachment could own the attempt; the
+/// wire's two endings, `file_done` per file and `xfer_done` for the task, land
+/// on different rows because of it.
 ///
 /// Pure Dart — no Flutter, and nothing about sockets. The session layer decides
 /// *when* to write; this decides what a write means.
@@ -53,10 +64,13 @@ class TransferRepository {
     return _begin(
       xferId: xferId,
       peerId: peerId,
-      fileName: fileName,
+      type: MessageType.file,
+      name: fileName,
       totalSize: totalSize,
       mime: mime,
       localPath: localPath,
+      rootPath: null,
+      files: null,
       now: now,
       direction: MessageDirection.outgoing,
       state: TransferState.pending,
@@ -85,10 +99,90 @@ class TransferRepository {
     return _begin(
       xferId: xferId,
       peerId: peerId,
-      fileName: fileName,
+      type: MessageType.file,
+      name: fileName,
       totalSize: totalSize,
       mime: mime,
       localPath: null,
+      rootPath: null,
+      files: null,
+      now: now,
+      direction: MessageDirection.incoming,
+      state: TransferState.offered,
+      messageStatus: MessageStatus.pending,
+    );
+  }
+
+  /// Begins a folder we are sending — design.md §4.6.
+  ///
+  /// [entries] is the whole manifest, directories and all, in the order the
+  /// files will be sent. The **directories are dropped here**: they carry no
+  /// bytes, so they get no attachment, and the receiver rebuilds them from the
+  /// manifest itself (§4.6 rule 4). Taking the manifest whole rather than asking
+  /// the caller to filter is deliberate — the filtering is a rule about what an
+  /// attachment is, so it belongs with the code that writes attachments.
+  ///
+  /// A folder holding nothing but empty directories is therefore a message with
+  /// **no attachments at all** and still a transfer. That is a real thing a user
+  /// can send, not a case to guard against.
+  ///
+  /// [folderPath] is where the folder is on **this** device. Each file's
+  /// attachment records its own absolute path under it, so a file can be opened
+  /// or read again after the bubble exists, the same reason a single file's
+  /// attachment stores the path it was sent from.
+  Future<Transfer> beginOutgoingFolder({
+    required String xferId,
+    required String peerId,
+    required String folderName,
+    required String folderPath,
+    required List<ManifestEntry> entries,
+    required DateTime now,
+  }) {
+    return _begin(
+      xferId: xferId,
+      peerId: peerId,
+      type: MessageType.folder,
+      name: folderName,
+      totalSize: _totalOf(entries),
+      mime: null,
+      localPath: null,
+      rootPath: folderPath,
+      files: entries,
+      now: now,
+      direction: MessageDirection.outgoing,
+      state: TransferState.pending,
+      messageStatus: MessageStatus.pending,
+    );
+  }
+
+  /// Stores a folder offer that has arrived and is waiting for the user.
+  ///
+  /// The receiving half of [beginOutgoingFolder], and the same shape: one
+  /// message, one attachment per file, one `offered` transfer for the task. The
+  /// files are stored before the user has agreed to anything because the offer
+  /// *is* the list — the card says how many files and how large before the user
+  /// decides, and there is nothing else to say it from.
+  ///
+  /// No `localPath` yet: where a file lands is decided when it is written, by
+  /// `FolderLayout` under the download root, and a path guessed here would be
+  /// the prediction the real one replaces.
+  Future<Transfer> beginIncomingFolder({
+    required String xferId,
+    required String peerId,
+    required String folderName,
+    required List<ManifestEntry> entries,
+    required DateTime now,
+  }) {
+    return _begin(
+      xferId: xferId,
+      peerId: peerId,
+      type: MessageType.folder,
+      name: folderName,
+      totalSize: _totalOf(entries),
+      mime: null,
+      localPath: null,
+      rootPath: null,
+      files: entries,
       now: now,
       direction: MessageDirection.incoming,
       state: TransferState.offered,
@@ -163,20 +257,31 @@ class TransferRepository {
     );
   }
 
+  /// The one transaction every beginning goes through.
+  ///
+  /// [files] is what makes a beginning a folder: null for a single file, which
+  /// gets one attachment named by [name], and a list of file entries for a
+  /// folder, which gets one attachment each and no single owning attachment.
   Future<Transfer> _begin({
     required String xferId,
     required String peerId,
-    required String fileName,
+    required MessageType type,
+    required String name,
     required int totalSize,
     required String? mime,
     required String? localPath,
+    required String? rootPath,
+    required List<ManifestEntry>? files,
     required DateTime now,
     required MessageDirection direction,
     required TransferState state,
     required MessageStatus messageStatus,
   }) async {
     final String messageId = const Uuid().v4();
-    final String attachmentId = const Uuid().v4();
+    // Null for a folder: the transfer belongs to the task, and §4.6 rule 3 gives
+    // every file in it the same `xferId` — so there is no one attachment for this
+    // column to name.
+    final String? attachmentId = files == null ? const Uuid().v4() : null;
     final int at = now.millisecondsSinceEpoch;
 
     await _db.transaction(() async {
@@ -192,11 +297,14 @@ class TransferRepository {
         conversationId: conversation.id,
         peerId: peerId,
         direction: direction.wire,
-        type: MessageType.file.wire,
+        type: type.wire,
         // A file message has no body: the name and the size live on the
         // attachment, and a copy of them here would be a second version of the
-        // truth to keep in step.
-        body: const Value<String?>(null),
+        // truth to keep in step. A *folder* message has only the name, because
+        // it has no attachment of its own to carry one — the attachments are the
+        // files inside it, and the folder's own name is the one thing about the
+        // transfer that would otherwise be nowhere.
+        body: Value<String?>(files == null ? null : name),
         status: messageStatus.wire,
         createdAt: created,
       ));
@@ -207,15 +315,37 @@ class TransferRepository {
         unread: direction == MessageDirection.incoming,
       );
 
-      await _transfers.insertAttachment(AttachmentsCompanion.insert(
-        id: attachmentId,
-        messageId: messageId,
-        fileName: fileName,
-        size: totalSize,
-        state: state.wire,
-        mime: Value<String?>(mime),
-        localPath: Value<String?>(localPath),
-      ));
+      if (files == null) {
+        await _transfers.insertAttachment(AttachmentsCompanion.insert(
+          id: attachmentId!,
+          messageId: messageId,
+          fileName: name,
+          size: totalSize,
+          state: state.wire,
+          mime: Value<String?>(mime),
+          localPath: Value<String?>(localPath),
+        ));
+      } else {
+        await _transfers.insertAttachments(<AttachmentsCompanion>[
+          for (final ManifestEntry entry in files)
+            if (!entry.isDir)
+              AttachmentsCompanion.insert(
+              id: const Uuid().v4(),
+              messageId: messageId,
+              // The peer's name for the file, verbatim — the same rule a single
+              // file's `fileName` follows. `localPath` is where it really is,
+              // which for a name this platform will not create is somewhere
+              // else.
+              fileName: entry.name,
+              relPath: Value<String?>(entry.relPath),
+              size: entry.size,
+              state: state.wire,
+              localPath: Value<String?>(
+                rootPath == null ? null : _under(rootPath, entry.relPath),
+              ),
+            ),
+        ]);
+      }
 
       await _transfers.insertTransfer(TransfersCompanion.insert(
         id: xferId,
@@ -239,6 +369,25 @@ class TransferRepository {
       bytesTotal: totalSize,
       updatedAt: now,
     );
+  }
+
+  /// [relPath] as a path under [root], in this platform's spelling.
+  ///
+  /// `relPath` is `/`-separated by definition (§4.6) and the local path is not,
+  /// on Windows, so the conversion happens once, here, rather than at every
+  /// caller that wants to turn a manifest entry back into a file.
+  static String _under(String root, String relPath) {
+    return '$root${Platform.pathSeparator}'
+        '${relPath.replaceAll('/', Platform.pathSeparator)}';
+  }
+
+  /// The bytes a folder's files add up to.
+  ///
+  /// Directories contribute nothing, and the caller does not pass them anyway —
+  /// this is the manifest's own arithmetic, so that the number the card shows is
+  /// the number the transfer row is measured against.
+  static int _totalOf(List<ManifestEntry> files) {
+    return files.fold(0, (int sum, ManifestEntry entry) => sum + entry.size);
   }
 
   Future<Transfer?> byId(String xferId) async {
@@ -267,20 +416,68 @@ class TransferRepository {
     return row == null ? null : _toAttachment(row);
   }
 
-  /// The attachment behind each of [messageIds], keyed by message id.
+  /// The attachments behind each of [messageIds], keyed by message id — a
+  /// **list** per message, because a folder is one message with many.
   ///
   /// One query for a whole page of chat, because that is how the chat page asks
   /// for it: fifty bubbles are rendered at once and a file bubble needs its
   /// attachment to have anything to draw. Text messages are simply absent from
-  /// the map — a lookup that misses is the same answer as a null.
-  Future<Map<String, Attachment>> attachmentsForMessages(
+  /// the map — a lookup that misses is the same answer as an empty list.
+  ///
+  /// Each list is in the DAO's order (by `rel_path`, so a folder reads as a
+  /// folder). A single file's list holds one row and a folder of empty
+  /// directories holds none, which is why nothing here assumes a length.
+  Future<Map<String, List<Attachment>>> attachmentsForMessages(
     Iterable<String> messageIds,
   ) async {
     final List<AttachmentRow> rows =
         await _transfers.attachmentsForMessages(messageIds);
-    return <String, Attachment>{
-      for (final AttachmentRow row in rows) row.messageId: _toAttachment(row),
-    };
+    final Map<String, List<Attachment>> byMessage =
+        <String, List<Attachment>>{};
+    for (final AttachmentRow row in rows) {
+      (byMessage[row.messageId] ??= <Attachment>[]).add(_toAttachment(row));
+    }
+    return byMessage;
+  }
+
+  /// The **folder task** behind each of [messageIds], keyed by message id.
+  ///
+  /// The read that makes a folder's progress survive a restart or a page the
+  /// user scrolled away from. A single file's progress lives on its attachment,
+  /// but a folder's belongs to no single file, so its own row is the only place
+  /// it is written down — and without this the card would show a folder's files
+  /// and no idea how far along the transfer was until the service happened to
+  /// emit something.
+  ///
+  /// A message whose newest attempt was a retry gets the retried row, because
+  /// the DAO orders newest first and the first row per message wins here.
+  Future<Map<String, Transfer>> tasksForMessages(
+    Iterable<String> messageIds,
+  ) async {
+    final List<TransferRow> rows =
+        await _transfers.taskTransfersForMessages(messageIds);
+    final Map<String, Transfer> byMessage = <String, Transfer>{};
+    for (final TransferRow row in rows) {
+      final String? messageId = row.messageId;
+      if (messageId == null) {
+        continue;
+      }
+      // Newest wins, and the query put it first — so this is `putIfAbsent` and
+      // not an assignment, which would leave the *oldest* attempt in place.
+      byMessage.putIfAbsent(messageId, () => _toTransfer(row));
+    }
+    return byMessage;
+  }
+
+  /// Every attachment of one message, in the DAO's order.
+  ///
+  /// For a bubble that is not being drawn from a page — the accept/decline
+  /// listener, which has one offer in hand and needs all of its files before it
+  /// can say how big the folder is.
+  Future<List<Attachment>> attachmentsForMessage(String messageId) async {
+    final List<AttachmentRow> rows =
+        await _transfers.attachmentsOfMessage(messageId);
+    return rows.map(_toAttachment).toList(growable: false);
   }
 
   /// Moves a transfer along, without ending it.
@@ -328,6 +525,71 @@ class TransferRepository {
       tempPath: tempPath,
       updatedAt: _clock().millisecondsSinceEpoch,
     );
+  }
+
+  /// Marks one file of a folder as landed, and records where it is.
+  ///
+  /// The per-file half of a folder's ending. `file_done` is what triggers it, and
+  /// it has to be written as each file arrives rather than when the task ends:
+  /// a folder of ten thousand files that fails on the last one has nine thousand
+  /// nine hundred and ninety-nine files on disk, and a card that could only say
+  /// "failed" would be hiding all of them.
+  ///
+  /// The byte count is read from the row rather than passed in. A finished file
+  /// has moved every byte it promised, and a caller that supplied the number
+  /// would be supplying a second copy of it — one that could disagree with the
+  /// size the offer was accepted against.
+  Future<void> finishFile(String attachmentId, {required String localPath}) async {
+    final AttachmentRow? row = await _transfers.attachmentById(attachmentId);
+    if (row == null) {
+      return;
+    }
+    await _transfers.updateAttachment(
+      attachmentId,
+      state: TransferState.done.wire,
+      localPath: localPath,
+      transferred: row.size,
+    );
+  }
+
+  /// Records that an offer is on the wire — §5.2 rule 5's boundary.
+  ///
+  /// The one moment that changes what `pending` means. Before it the row says
+  /// "this peer has never heard of this transfer", which is what makes it part
+  /// of the queue that is offered again when the peer comes back; after it the
+  /// peer is holding an offer, and the transfer's ending is its own business.
+  /// [unfinished] is the other reader of that distinction.
+  ///
+  /// Only the transfer row moves. The attachment stays `pending` until bytes
+  /// move, the same as it did before this existed — an offer is not progress.
+  Future<void> markOffered(String xferId, {DateTime? now}) {
+    return _transfers.updateTransfer(
+      xferId,
+      state: TransferState.offered.wire,
+      updatedAt: (now ?? _clock()).millisecondsSinceEpoch,
+    );
+  }
+
+  /// The transfers [peerId] was never offered, oldest first — §5.2 rule 5.
+  ///
+  /// Everything a re-offer needs is already on the rows: the `xferId` to offer
+  /// under again, the message to re-read the folder's name from, and — for each
+  /// file — the path it came from. Nothing here is remembered in memory, so a
+  /// process that dies with a file owed finds it owed again on the next start.
+  Future<List<Transfer>> owedOutgoing(String peerId) async {
+    final List<TransferRow> rows = await _transfers.owedOutgoing(peerId);
+    return rows.map(_toTransfer).toList(growable: false);
+  }
+
+  /// The body of [messageId], which for a folder is its name — §5.1.1.
+  ///
+  /// A folder's message carries nothing else: the files are attachments and the
+  /// name is the one thing about the transfer that would otherwise be nowhere.
+  /// A re-offer needs it, because the receiver creates the folder's directory
+  /// from the name in the offer.
+  Future<String?> messageBody(String messageId) async {
+    final MessageRow? row = await _messages.byId(messageId);
+    return row?.body;
   }
 
   /// Marks a transfer finished, and its attachment with it.
@@ -419,6 +681,16 @@ class TransferRepository {
       }
 
       final String? messageId = row.messageId;
+      if (attachmentId == null && messageId != null) {
+        // A folder: the ending belongs to the task, and the files are the
+        // attachments under it. `localPath` is deliberately not passed — there
+        // is no one file it could name, and each file's own path was written as
+        // that file landed.
+        await _transfers.endPendingAttachments(
+          messageId,
+          state: state.wire,
+        );
+      }
       if (messageId != null) {
         // `delivered` here means "the peer has this file", which is what the
         // tick in the chat means for every other message too. The §4.5
@@ -440,9 +712,19 @@ class TransferRepository {
   /// move them again — the map that held their senders is gone — so a progress
   /// bar reading them would sit at 40% forever, and the honest thing to show is
   /// that the attempt failed.
+  ///
+  /// `pending` is deliberately **not** in the list. It means the peer was never
+  /// asked, which is not an attempt that died but a debt that has not been paid
+  /// — §5.2 rule 5's queue, and the reason a file sent to a phone that was away
+  /// is still there to be offered after the app is restarted. An attempt that
+  /// really was interrupted is at `offered` or past it
+  /// ([markOffered] is what puts it there).
+  ///
+  /// An incoming offer is written `offered` from the start, so a peer's offer
+  /// nobody ever answered is still swept — correctly, since the sender will not
+  /// be waiting at a socket it opened before the restart.
   Future<List<Transfer>> unfinished() async {
     final List<TransferRow> rows = await _transfers.inStates(<String>[
-      TransferState.pending.wire,
       TransferState.offered.wire,
       TransferState.transferring.wire,
     ]);

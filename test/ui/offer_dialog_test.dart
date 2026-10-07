@@ -52,7 +52,7 @@ void main() {
     await tester.tap(find.text('ask'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Incoming file'), findsOneWidget);
+    expect(find.text('Incoming file or folder'), findsOneWidget);
     expect(
       find.text('Bob-PC wants to send you holiday.png (3.0 MB)'),
       findsOneWidget,
@@ -98,7 +98,7 @@ void main() {
     await tester.tapAt(const Offset(20, 20));
     await tester.pumpAndSettle();
 
-    expect(find.text('Incoming file'), findsNothing);
+    expect(find.text('Incoming file or folder'), findsNothing);
     expect(answer, isNull);
   });
 }

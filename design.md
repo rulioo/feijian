@@ -343,9 +343,13 @@ AP 隔离下，两端都在正常广播，只是包根本到不了对面。更�
 | `paused` / `hidden` → `resumed` | 是 | 真的不在前台了：可能被冻结，也可能已换网络 |
 | 冷启动那次 `resumed` | 否 | 没有"离开过"，而 discovery 刚刚 `start()` 过 |
 | `inactive` → `resumed` | 否 | 失去窗口焦点、拉下通知栏也是 `inactive`，它们不会把网络拿走 |
-| 离开不足 2 秒 | 否 | 重建要关掉监听 socket，有几毫秒是聋的；为"瞄一眼应用切换器"付这个代价不值 |
+| 离开不足 1 秒 | 否 | 重建要关掉监听 socket，有几毫秒是聋的；一个瞬时的 bounce 不值得付这个代价 |
 
 `hidden` 和 `paused` 都算离开，是因为顺序按平台不同：Android 走 `inactive → hidden → paused`，而最小化的桌面窗口停在 `hidden`，永远到不了 `paused`。
+
+**阈值从 2 秒改成 1 秒**，因为 2 秒太长：切到另一个 app 再切回来大约就是这个时长，于是"名单看着不对时最可能做的那个动作"恰好是唯一保证不生效的动作。代价是不对称的——多一次重建是几毫秒没人看得见，少一次是用户得手动刷新。
+
+**真机取证（2026-10-05）**：+5 的 APK **根本不含这段代码**。用户报"点返回、激活 app 都没有触发"，我拆包核对：`libapp.so` 里 `DiscoveryService`、`ChatPage`、`DevicesPage`、`settingsProvider` 这些类名都在，**`DiscoveryLifecycle` 出现 0 次**；同一份包里 `rejoined the group` 有 3 处（三个 ABI 各一次），说明 §4.1.3 的接收路径修复在。结论：**+5 有"修复"没有"触发"**，用户报的现象完全由此解释——这也正好对上他说的"手工点一下可以"。教训：**APK 的构建时间和 commit 时间不可比**，这个项目的 APK 是从带未提交改动的工作区里构建的，只有读二进制才能确定包里有什么。
 
 **这块测试只覆盖触发，不覆盖修复**：`rescan()` 对 socket 做什么由 §4.1.3 那组驱动真实数据报的测试负责。反过来也一样——把守卫删掉（改成只要 `resumed` 就重扫），这里会有 3 个测试失败。"冷启动不重扫""失焦不重扫""瞄一眼不重扫"这三条正是守卫存在的理由，没有它们，删掉守卫没有任何东西会报警。
 
@@ -554,6 +558,55 @@ while (offset < size) {
 
 ---
 
+---
+
+#### 4.6.2 文件夹在会话层的实现约定（M4）
+
+§5.1.1 管的是文件夹在库里长什么样，这里管的是**一次文件夹传输在两端各自怎么走**。§4.6 的规则落到 `TransferService` 上时又定下来这些。
+
+| 决定 | 结论 | 理由 |
+|---|---|---|
+| 接收端什么时候建 receiver | **收到第一个说出文件名的帧时** | 一条 `role: data` 连接到达时，帧里还没有 `relPath` —— 那是这条连接上第一个 `file_data` 才有的（§4.6 规则 3）。所以 `_onDataConnection` 的准入条件是"这个 offer 已被接受"（`decided`），不是"已经有 receiver"；按后者写会把文件夹的每条连接都拒掉 |
+| 谁来建 receiver | 两个入口都要，但**只能建一次** | 能启动一个文件的只有两件事：它在数据连接上的第一个 `file_data`，和发送方为**零字节文件**在控制连接上发的 `file_done`。两者都可能在对方还没公布 receiver 时到达 |
+| 回执里的 `relPath` | 每个文件的 `file_done` 都必须带 | 一次文件夹的所有文件共用一个 `xferId`（§4.6 规则 3），回执不点名，第二个文件的回执就会被读成第一个的答案 |
+| `xfer_done` 的语义 | **陈述，不是信号** | 两端各数各的文件，谁都不靠这一帧知道自己完事了。所以 `_onTransferFrame` 里这一支是**空操作** |
+| 一个文件失败之后 | **文件夹继续** | 一个文件发不出去不等于整个文件夹发不出去，后面那些可能正是用户要的。任务最后以 `failed` 结束，而已经落地的文件留在磁盘上（§5.1.1） |
+| `file_cancel` 不带 `relPath` | 整个任务作废 | 这就是"取消"在一个文件夹上的意思 |
+| 取消恰好落在"文件正在改名入位"这个窗口 | 这个文件**保留**，后面的不再取 | 见下 |
+| 同名文件夹 | **合并**，不给自己编号 | 见下 |
+
+**一次文件夹的交错：两个连接，同一个文件。** 接收端为一个文件建 receiver 要跨好几个 await（先建目录，再开 `.part`），而 receiver 是在这之后才记到 `entry` 上的。在这段窗口里，"有没有文件在收"这个判断两个入口都会读到"没有" —— 于是同一个文件被建了两份 receiver，两份都拿着同一个 `.part`。第一份改名入位时第二份还开着，Windows 直接给 `errno = 32`。症状是**一个磁盘错误**：
+
+```
+could not finish the file: PathAccessException: Cannot rename file to
+  '...\holiday\notes.txt', path = '...\holiday\notes.txt.part'
+  (OS Error: 另一个程序正在使用此文件，进程无法访问。, errno = 32)
+```
+
+真正的原因是两个连接（`file_data` 走数据连接、`file_done` 走控制连接）在抢同一个文件的所有权。修法是让**建 receiver 变成一次认领**：`_folderFileOf` 在第一个 await 之前就把 `entry.starting` 置上，第二个来的人 await 它的 future，拿到同一个 receiver 而不是再造一个。调用方各自跑在一条串行链上是不够的 —— 它们跑在**两条**流上。
+
+**同一个文件的两个入口是这个里程碑唯一的真并发**，其余的地方靠的是两条不变量：数据帧串行（`_Incoming` 的队列，理由见类注释），以及"一个文件夹同时只有一个文件在途"。
+
+**发送端开文件在开 socket 之前，接收端扔 socket 在收下一份之前。** 两条互为镜像，都是为了同一件事：**不要让"自己这边出问题"在对端看起来像"对端死了"**。
+
+- 发送端先 `OutgoingFile.open` 再校验大小，最后才 `connectData`。反过来的话，一个自己发不出去的文件会留下一条**一帧未发就关闭**的数据连接 —— 那正是"发送方中途死掉"的样子，接收端只能据此判整个任务失败（它没有别的办法分辨）。顺序对了，这种情况在链上只留下一条点名该文件的 `file_cancel`，文件夹照常往下走。
+- 接收端 `_Incoming.detach` 先清字段再 await 关闭。发送方在收到回执的**那一刻**就去开下一个文件的连接，而这时上一条还记在 `entry.data` 里的话，新连接会被当成"一次传输的第二条连接"而拒收。和 `_releaseOutgoingFile` 是同一个道理的两次出现。
+
+**取消落在文件夹上的两个窗口。** 单个文件只有一个窗口，文件夹多一个：
+
+- 文件正在改名入位时收到取消。这时候字节已经全到，丢不丢这个文件不是"半个东西"的问题 —— 取消的是排在后面的文件。所以 `_stopIncoming` 在这个窗口里只置 `entry.stopping`，由 `_finishFolderFile` 在落地之后处理：给对端发一条不带 `relPath` 的 `file_cancel`（它正准备开下一个文件的连接），结束任务，**已落地的文件原样留着**。判据用 `finished`（每个文件一次，见下）而不是"有没有文件在途"。
+- 没有文件在途时收到取消。这就是单个文件那条普通路径，落地过的文件同样不动 —— `_releaseIncoming(cancelFile: true)` 只碰 `entry.receiver`（在途的那个 `.part`）。
+
+**`file_cancel` 不为失败的附件写行。** 收到一个文件的 `file_cancel` 只做两件事：把这个 `relPath` 从 `expected` 里拿掉、置 `anyFailed`。附件行**故意不动** —— 任务收尾时 `TransferRepository.end` 的 `endPendingAttachments` 会一次性把所有没有结论的行写掉，而且它写得完整（`done` 永不覆盖）。这里再写一次就是同一条规则住在两个地方，外加一个中途读起来像卡住的行。
+
+**同名文件夹合并，重名文件才编号。** `IncomingFile` 本来就会给撞名的文件让路（` (1)`、` (2)`），这就够了：第二次收到 `photos`，要的是"两张照片都在 photos 里"，而不是磁盘上多出一个 `photos (1)` 目录去冒充用户说的那个文件夹。
+
+**一个顺带修掉的旧 bug。** `_maybeFinishIncoming` 先置 `entry.finished = true` 再调 `_failIncoming`，而后者当时的守卫里含 `finished` —— 于是安装失败（改名失败、磁盘满）**被自己静默吞掉**：行永远停在 `transferring`，还占着并发名额。守卫的职责是"别把同一件事收尾两次"，那就只该看 `cancelled`。这是实现文件夹时踩出来的，影响的是单文件路径。
+
+**这块的测试与被破坏时的表现**（每组都实际验证过删掉守卫会有测试失败）：`transfer_service_test.dart` 的文件夹两组 9 条（`a folder crossing` 7 条、`stopping a folder` 2 条，另加一个真实的目录树对比辅助 `treeIn`），加上 `folder_manifest_test.dart` / `folder_layout_test.dart` 各自那一组。逐个实跑删掉的守卫：认领等待（`entry.starting`）、空文件夹的收尾、`_maybeFinishIncoming` 的文件夹分支、`entry.stopping` 分支、`anyFailed` 的置位 —— 分别是 6 / 1 / 5 / 1 / 1 条失败。发送端"先开文件后开 socket"的顺序由"一个文件中途变大"那条测试钉住：顺序反了，接收端会把整个任务判失败，后面本来能到的文件也就到不了。
+
+
+
 ## 5. 数据模型
 
 ### 5.1 SQLite 表结构
@@ -616,8 +669,8 @@ CREATE TABLE attachment (
 -- 传输任务（用于进度恢复与续传）
 CREATE TABLE transfer (
   id             TEXT PRIMARY KEY,    -- = xferId
-  message_id     TEXT REFERENCES message(id),
-  attachment_id  TEXT REFERENCES attachment(id),
+  message_id     TEXT REFERENCES message(id) ON DELETE SET NULL,
+  attachment_id  TEXT REFERENCES attachment(id) ON DELETE SET NULL,
   peer_id        TEXT NOT NULL,
   direction      TEXT NOT NULL,       -- 'in' | 'out'
   state          TEXT NOT NULL,
@@ -636,8 +689,12 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 | 关系 | 处理 | 理由 |
 |---|---|---|
 | `attachment.message_id → message` | `ON DELETE CASCADE` | 附件脱离消息就没有意义，留着只会变成垃圾文件 |
-| `transfer.message_id/attachment_id → ...` | 默认 | 传输任务可独立于消息清理 |
+| `transfer.message_id/attachment_id → ...` | `ON DELETE SET NULL` | 传输任务可独立于消息清理（见下） |
 | `conversation.peer_id → peer` | **不建外键** | 见下 |
+
+**`transfer` 的外键写的是 `SET NULL`，不是「默认」。** 这一格最初只写了「默认」，理由栏写的是「传输任务可独立于消息清理」——但这两句话说的不是一件事。裸 `REFERENCES` 的默认动作是 `NO ACTION`，而 `foreign_keys = ON` 时它的含义不是「别管这张子表」，是**拒绝这次删除**。于是每一条图片/文件消息（也就是每一条有 transfer 在后面的消息）都删不掉，含这类消息的会话也清不掉；UI 那边又在没等结果的情况下弹了「已删除」，用户看到的是提示成功、消息还在。真正对应那句话的是 `SET NULL`：transfer 行留下，只是松开指针，正是「独立于消息清理」。
+
+这是 schema v2（`database.dart` 的 `schemaVersion = 2`）。外键动作是表定义的一部分，SQLite 没有 `ALTER` 能改它，只能重建表再拷行——drift 的 `m.alterTable(TableMigration(transfers))` 做的就是这个。`onCreate` 建出来的是当前版本，`onUpgrade` 只管老文件，所以升级路径平时没有任何测试走到；`migration_test.dart` 于是用手写 SQLite 造一个真的 v1 文件再打开它，验的是「行还在、`user_version` 到了 2、那条以前会被拒绝的删除现在能过」。
 
 `conversation.peer_id` 不加外键，是对最初草案的修正。原因是 `peer` 表只是"设备广播内容的缓存"，而 `conversation`/`message` 是**用户自己的数据**。一旦建了引用，"忘记此设备"这个唯一会删除 peer 行的操作就只剩两种结局：
 
@@ -647,6 +704,29 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 两者都不可接受——用户整理设备列表不该付出丢历史的代价。另外 `message.peer_id` 本身就没有引用，说明"有 peer_id 但没有 peer 行"本来就是这份 schema 允许的状态，单给 conversation 加约束连一致性都换不来。
 
 **草稿会自己建出会话行**。`conversation` 行本来只在落第一条消息时创建（§5.1 的 `ensureConversation`），但草稿完全可以先于消息存在——给一个刚发现的设备打第一个字，正是最常见的场景，此时那行还不存在。所以写草稿前先 `ensureConversation`：否则 `UPDATE ... WHERE peer_id = ?` 匹配零行，SQLite 照样报成功，用户切到别的设备再切回来，打了一半的字就没了。这时会话行的 `last_msg_at` 仍为 NULL——草稿不是消息，不该把设备列表按"最近消息"重排，也不该动未读徽标。
+
+#### 5.1.1 文件夹在库里的形状（M4）
+
+§4.6 的文件夹是"一条消息配多个文件"，落到 §5.1 的表上就是三样东西：
+
+| 行 | 数量 | 内容 |
+|---|---|---|
+| `message` | 1 | `type = 'folder'`，`text` 是**文件夹自己的名字** |
+| `attachment` | 每个**文件**一行 | `rel_path` 是它在文件夹里的位置，`file_name` 是最后一段 |
+| `transfer` | 1 | 整个任务的 `xferId`，`attachment_id` 为 **NULL** |
+
+几条定下来的理由：
+
+- **文件夹名放在 `message.text`**：单个文件的名字在它自己的 attachment 上；文件夹没有"自己"的 attachment 可以承载名字（那些 attachment 都是里面的文件），而接收端需要它——那是下载目录下要创建的目录名。
+- **目录不生成 attachment**：目录没有字节。空目录靠清单里的 `isDir` 条目重建（§4.6 规则 4），给它一行 attachment 等于给一个不是文件的东西画文件卡片。于是"只有空目录的文件夹"是一种合法消息：有任务，零附件。
+- **`transfer.attachment_id` 为 NULL**：§4.6 规则 3 让文件夹里每个文件共用同一个 `xferId`，没有一个 attachment 代表得了这次尝试。这个 NULL 同时是两种结束的区分依据——`file_done` 结束一个文件，`xfer_done` 结束整个任务。
+- **失败不覆盖已经落地的文件**：传到第七个才失败的文件夹，前六个文件已经在磁盘上、用户能打开；把这些行改成 `failed`，就是一张盖住它们的卡片。所以收尾只作用于「还没落地的」那些行，`done` 永不被改写。
+- **附件读出来是列表而不是单值**：原来按 messageId 建 `Map<String, Attachment>`，一个九文件的文件夹只会留下查询最后返回的那一行——在 UI 上表现为"文件夹只显示了其中一个文件"。整条读路径（DAO → repository → `ChatState` → 页面）因此都改成了列表。
+- **任务单独按消息读**：文件夹的实时进度没有 attachment 可以挂（`_live` 按 attachmentId 索引），所以另有一张按消息 id 索引的任务表；重试写新行而不是改写旧行，读的时候取 `updated_at` 最新的那次。
+
+**这块的测试与被破坏时的表现**（16 个变异逐个实跑）：`manifest_entry_test.dart` 10 条，`transfer_repository_test.dart` 的文件夹两组 23 条。删掉目录过滤（`if (!entry.isDir)`）、不给 `message.text` 写文件夹名、让任务的 `attachment_id` 不为 NULL、收尾时覆盖 `done`、把 `transferred` 写死成 0、`localPath` 不做分隔符转换、`putIfAbsent` 改成赋值、去掉 `attachment_id IS NULL` 过滤、`updated_at` 改升序、`name` 直接返回整个 `relPath`、去掉空分量过滤、反斜杠不再算分隔符——每一个都有测试失败。
+
+有两处空值守卫（`insertAttachments` 的空批次、`attachmentsForMessages` 的空 id 列表）**没有任何测试能钉住**：实跑删掉后全部通过（drift 把空批次的 batch 和 `isIn([])` 都处理成了它们本该有的样子），按项目标准删掉了，空文件夹那条路径现在走的是真实查询。排序是唯一的例外——`ORDER BY rel_path` 删掉同样不报错（发送端本来就走一遍有序的清单，写入顺序恰好等于路径顺序），但它的承诺是真的（卡片不会在刷新后重新排列），于是补了一条"写入顺序 ≠ 路径顺序"的测试把它钉住。
 
 ### 5.2 离线消息队列
 
@@ -672,6 +752,56 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - 放在写入侧而不是两条 `ORDER BY` 里，是因为 `page()` 的排序同时是 keyset 游标的比较依据（游标得由调用方携带），而单调时间戳让现有查询和游标全部保持正确，不必改 schema，也不必改游标。
 - 必须和插入在**同一个事务**内，否则两个并发写入会读到同一个最大值、再次撞在一起。
 - 代价是时间戳可能比墙上时钟快一点点（突发中每条 +1ms）。这是聊天记录普遍接受的取舍，且偏离量由消息条数封顶，不会无端漂移。副作用是**时钟往回跳时新消息仍排在最后**——这正是想要的：刚敲的消息不该插进历史中间。
+
+#### 5.2.2 离线队列的实现约定（M4）
+
+规则 3、5、6 落在两个对象上，因为队列本来就是两张表：**文本队列**是 `message` 的行，归 `LanService`；**文件队列**是 `transfer` 的行，归 `TransferService`。补发一句话都是"查库、按序、沿用原 id"，但补发的**单位**不同——消息补发一条文本帧，文件补发一个 `file_offer`（文件夹是"一份清单 + 每个文件各开一条数据连接"）。
+
+**`pending` 在文件传输上必须只表示"从没上过线"。** 这是这一节所有规则的地基，也是 M3 到 M4 改动最大的地方。
+
+| 决定 | 结论 | 理由 |
+|---|---|---|
+| 什么时候告别欠 | `markOffered` 写在 `sendTransfer` 成功**之后、等回执之前** | 只有"从没上过线"才需要补发（规则 5），而"正在等回执"不是。写入放在等回执前，是为了让下一毫秒被杀的进程不会回来以为"没人被问过" |
+| 没人可问时 | `_runSend` / `_runSendFolder` **直接 return**，行留在 `pending` | M3 在这里抛 `TransferException`，于是"对方离开两秒"就变成用户要重新挑一次文件。返回而不是抛，是把这次尝试变回一笔欠账 |
+| 启动清扫扫谁 | `unfinished()` 只扫 `offered` / `transferring`，**`pending` 不再算** | 被杀掉的进程留下的"半途"确实只能是这两个状态之一（`markOffered` 是进入 `offered` 的唯一入口）。把 `pending` 也算进去，会在启动时把一整条离线队列判失败——正是规则 6 要救的东西 |
+| 删除/改动过的文件 | `failed`，不再是欠账 | 见下 |
+
+**残留窗口，明说。** `sendTransfer` 成功、`markOffered` 落库之前进程被杀：行停在 `pending`，而对端可能真的收到了那份 offer。下次补发会沿用同一个 `xferId` 重发，对端按 xferId 认领（`_claim`）拒掉重复，发送方在旧的 socket 上等不到回执、超时判失败。代价因此是**一次超时**，不是两条消息。要彻底消掉它得让"上线"和"记一笔"变成一次原子操作，而它们一个在 socket 上、一个在库里。
+
+**补发的顺序读消息的 `created_at`，不读 transfer 的 `updated_at`。** `owedOutgoing` 在 `transfer` 与 `message` 之间 join，按 `message.created_at` 升序。同一个文件夹的多个文件共用一条消息（§5.1.1 规则 3），它们的 `updated_at` 会落在同一毫秒——§5.2.1 正是为了消掉这种并列才让 `created_at` 在会话内严格递增。
+
+**文件夹的补发从行上重建，不重新走目录。** 每个文件的路径来自它自己的附件行的 `local_path`，文件夹名来自消息体（§5.1.1）。代价是明说的两条：**空目录没有行**，补发时带不出去；**本次选完之后新加进目录的文件**不会被补发——因为规则 5 要补的是"用户当初做的那次 offer"，而卡片列的正是这些附件行，两者必须一致。删除的东西：`FolderManifest.fileOf`（没有 lib 调用方也没有测试）和 `_Outgoing.directory`（文件夹的文件改成从各自的附件行读）。
+
+**文件不见了或变了，就写掉，不再欠着。** 三种情况走同一个 `_abandon`：行里没有路径、文件读不出来（`FileSystemException`）、大小和当初 offer 的不一样。`_abandon` 只写行、发事件，**不发 `file_cancel`**——对端从没听说过这个 `xferId`，发一帧关于它的取消是荒谬的。"文件已不存在"这句话由已有的重试路径说（`retryAttachment` → `RejectReason.notFound` → `l10n.fileMissing`），气泡上的 ✗ 因此按下去会**说话**，而不是再失败一次。
+
+**一次补发不超过 `kMaxConcurrentXfers`，剩下的等名额。** 第 4 个 offer 会被对端用 `busy` 拒掉，而 `busy` 是一个**结局**——无视上限的补发会亲手弄死它要救的那些传输。空出的名额由 `_releaseOutgoing` 补上，且**只在以 `done` 结束时**再触发一次：失败的东西有自己的结局要显示，而"刚回来就又被欠下"的那次不能自己触发自己，否则一个自称在线、拒绝每次写入的 socket 会在这里空转。
+
+**两次补发的重叠靠一次同步认领挡住。** 触发补发的事件有两个——连接建立、传输完成——它们互相独立，可以在同一个窗口里都读到同一批欠账行。同一个 `xferId` 上建两个 `_Outgoing` 会把同一份 offer 发两遍：对端拒掉第二份（id 已经被它认领），而发送方正在等**第二份**的回执，于是把一次进展顺利的传输判失败。所以 `_offerOwed` 在第一个 await 之前 `_claim`，`_abandon` 在写掉行的时候 `_release`。
+
+**规则 3a（新 ANNOUNCE 补发文本）挂在已有的 `changed` 分支里。** `LanService._absorbAnnounces` 本来就在"这台设备的公告变了"时写一次库；补发放在同一个分支内，而不是并排再写一个 `if (changed)`：让一条公告值得写库的理由，正是让它值得顺手清一次队列的理由，而一台每几秒重复自己的设备不构成新闻——每次重复都查一次队列就是网络上每台设备的开销。
+
+**这块的测试与被破坏时的表现**（16 处逐个实跑删掉，数字是报出的失败数）：
+
+| 删掉的东西 | 失败数 |
+|---|---|
+| `_runSend` / `_runSendFolder` 的"没人可问就欠着"分支 | 32 / 34 |
+| `_runSend` / `_runSendFolder` 的 `markOffered` | 23 / 18 |
+| `_releaseOutgoing` 里以 `done` 为条件的那次补发钩子 | 17 |
+| `_offerOwed` 的并发上限 | 65 |
+| `_reofferFile` 的三条放弃（无路径 / 读不到 / 大小变了） | 19 / 21 / 20 |
+| 新 ANNOUNCE 时的文本补发 | 14 |
+| `owedOutgoing` 的 `created_at` 升序 | 96 |
+| `_offerOwed` 的两个 `isConnected` 预检 | 0 |
+| `_offerOwed` 的重叠认领 `_claim` | 0 |
+| `_abandon` 的 `_release` | 0 |
+| `_reoffer` 的"没有消息"放弃 | 0 |
+
+后四项**没有测试钉住**，留着是有意的，理由各不相同，记在这里免得下次被当成死代码删掉：
+
+- **两个 `isConnected` 预检**是预过滤器不是守卫：删掉之后行为不变——没连接时建出来的 `_Outgoing` 会立刻从 `_runSend` 回到欠账状态，行还是对的。它们只省一次查库和几次 stat。代码注释里也是这么写的。
+- **`_claim`** 保护的是上面那段重叠：要让它失败得让两次触发落进同一个只有一次 await 宽的窗口，测试最多做到"很可能"，做不到"一定"，所以上限那条测试里加了一句"每个 `xferId` 只被 offer 一次"当弱断言，而不是假装它被钉死了。
+- **`_abandon` 的 `_release`** 漏掉看不出来：id 不会被复用（重试是同一个气泡上的**新** `xferId`）。留着是因为 `_known` 的含义是"现在属于我的 id"，而一个已经写掉的传输不属于任何人。
+- **`_reoffer` 的"没有消息"放弃**：`beginOutgoing` 一定建消息，所以这条分支现在到不了，它存在的意义是让 `Transfer.messageId` 为 null 这件事有个**结局**而不是悬着。
 
 ---
 
@@ -771,11 +901,12 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 | 交互 | 行为 |
 |---|---|
-| 拖拽文件到窗口 | 整个对话区变高亮遮罩层，松开即发送（Windows） |
+| 拖拽文件到窗口 | 整个对话区变高亮遮罩层，松开即发送（Windows）。拖进来的是目录就按文件夹发（§4.6），与 📁 按钮同一条路径 |
 | Ctrl+V 粘贴图片 | 直接作为图片消息发送 |
 | Ctrl+V 粘贴文件路径 | 识别为文件，作为文件消息发送 |
 | 图片气泡点击 | 全屏查看器，支持双指/滚轮缩放、左右切换同会话图片 |
 | 文件卡片点击 | 已下载 → 系统默认程序打开；未下载 → 开始下载 |
+| 文件夹卡片 | 计数而不是列名字（`24 files · 156 MB`）；进度条是**整个任务**的百分比。已落地的文件逐行列出（最多 5 行，其余折成 `…and N more`），每行有自己的 Open / Save as |
 | 长按/右键消息 | 复制文字 / 另存为 / 删除本地记录（M2 只有文字那两项，另存为属 M3） |
 | 发送失败 | 气泡旁红色感叹号，点击重试 |
 | 滚动到顶 | 分页加载更早历史（每页 50 条） |
@@ -810,17 +941,67 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 移除后**对话页不关闭**。会话里那条记录还在（历史上限见 §6.3.1 的说明），关掉页面看起来像"对话被删了"，而实际删掉的只是设备条目。
 
+#### 6.3.3 文件夹卡片读的是两份数据（M4）
+
+文件卡片只读一个 `attachment`，因为一个 attachment 就是那件事的全部。文件夹不是：它的**名字和文件清单**在 `attachment` 行上（§5.1.1：一个文件一行，消息上只有文件夹自己的名字），而**它走到哪一步了**只有 `transfer` 行知道——§4.6 给整个文件夹一个 `xferId`，任务是这个 `xferId` 的行。所以 `FolderCard` 收两份：`files` 和 `task`。
+
+`task` 可空且必须可空。它按页读，卡片画出来的那一帧里任务行可能还没回来；一个要求非空的卡片会在这一瞬间什么都不画。
+
+| 卡片上的东西 | 来自 | 为什么 |
+|---|---|---|
+| 名字 | `message.text` | §5.1.1：文件夹自己的名字不在任何 attachment 上 |
+| `24 files · 156 MB` | `files` | 计数是附件的条数；大小是**文件**的和，目录不占字节 |
+| 进度条百分比 | `task.progress` | 任务的分数，不是某个文件的。否则除当前那一个之外每个文件都让条停在 0，看起来像卡住 |
+| 逐行 Open / Save as | `files` 里 `isOpenable` 的那些 | 已落地的才可点。没到的文件列出来只是些点不动的名字 |
+| 红字 `N files did not arrive` | `files` 里 `failed` 的条数 | 任务失败会保留已经落地的文件（§5.1.1），所以「有多少没到」和「剩下的都在这儿」要同时说 |
+
+**最多列 5 行。** 一个文件夹可能有一千个文件，气泡还是气泡；被截断的是列表而不是文件——它们在磁盘上，上面的计数和 Open 都还在。
+
+**Accept / Decline 是对整件事的一次回答。** §9.2 没有部分接受，所以卡片的两个按钮走的是任务的 `xferId`，不是任何一个 attachment 的 id：文件夹的 transfer 行 `attachment_id` 是 NULL（§4.6 规则 3），`acceptAttachment` 那条按 attachment 找 `xferId` 的路径**找不到它**。Cancel 同理，停的是任务——正在写的那个文件连同 `.part` 一起丢掉，后面的文件发个 `file_cancel` 告诉对方别发了（§4.6），已经落地的留下。
+
+**失败的文件夹没有 retry。** §5.2 的重试要重新读一遍源文件，而文件夹的源不在卡片手上的任何一行里（§4.6 规定文件夹的文件留在发送端磁盘上，清单只在线上走一趟）。所以发送端气泡上是那个红叉，点了没有反应——`MessageBubble.onRetry` 因此是可空的：做不成的按钮不如没有按钮，一个按下去只有沉默的图标比一个普通图标更糟。想重发就再拖一次，或者再点一次 📁。
+
+**改动记录（变异测试）**。逐条摘掉护栏后跑 `test/ui/chat_page_test.dart` 与 `test/ui/message_bubble_test.dart`，13 条全部被测试抓到，没有活下来的：
+
+| 摘掉的护栏 | 被几个测试抓到 |
+|---|---|
+| `message.type == MessageType.folder`（当成普通文件消息） | 29 |
+| 给卡片传 `task` | 21 |
+| Cancel 走 `cancelTask(task.id)`（改成走某一个文件的 `cancelAttachment`） | 8 |
+| Accept 走 `accept(task.id)`（改成 `acceptAttachment`） | 10 |
+| Decline 走 `decline(task.id)`（改成 `declineAttachment`） | 9 |
+| 文件夹的 `openable`（改成恒为 false） | 16 |
+| 卡片标题下不再重复画一遍名字（`&& !folder`） | 16 |
+| 进度条只在 `transferring` 时画 | 16 |
+| 只列 `isOpenable` 的文件 | 15 |
+| 列表上限 5 行 | 13 |
+| 红字里数 `failed` 的文件 | 12 |
+| 未应答时才给 Accept / Decline | 18 |
+| `notFound` 用文件夹自己的那句话（改成文件的失败文案） | 17 |
+
+**测不到的一处**：`FileChooser.pickFolder` 里「Android 上拿到 `/` 就当用户取消了」这条护栏在本机测不了——`Platform.isAndroid` 在 Windows 上是 false，而 `lib/platform/` 是平台接缝，按惯例没有单测。这条靠真机复验。
+
 ### 6.4 页面三：Settings
 
 | 分组 | 项 |
 |---|---|
 | **Profile** | Display name（默认系统主机名）、Device icon、Avatar |
-| **Files** | Download folder（默认 `Downloads/Feijian`）、Auto-accept policy：`Off` / `Images under __ MB` / `All from trusted devices` |
+| **Files** | Download folder（默认 `Downloads/Feijian`）、Confirm before receiving（**默认关**，见下） |
 | **Network** | Listen port、组播地址、启用的网卡多选、传输限速（可选） |
-| **Notifications** | 消息通知、文件接收通知、声音 |
+| **Notifications** | Message notifications（**默认开**，控制新消息提示音，见 §6.6） |
 | **System** | 开机自启（Windows）、最小化到托盘（Windows）、后台常驻（Android 前台服务） |
 | **Language** | English（v1 唯一选项，下拉框已就位） |
 | **About** | 版本、协议版本、开源许可 |
+
+**接收确认（`confirmBeforeReceiving`，默认 `false`）**
+
+关（默认）＝收到图片和文件直接接收，不弹任何确认；开＝每个文件都要用户点 Accept 才接收。
+
+开关的**名字就是极性**，这是刻意的。同一个设置也能写成「Receive without asking」，默认开——那样产品行为完全一样，但默认值藏在双重否定里。早期草稿正是后一种：一个三选一的 `AutoAcceptPolicy`，默认值 `askEveryTime`，与本条要求正好相反。
+
+之所以是**一个开关而不是三选一**：`Images under __ MB` 需要一条尺寸配置、`All from trusted devices` 需要设备信任标记，而 v1 里没有任何地方会写入这两个值。摆出三个选项、其中两个是空壳，比不摆更糟。真正实现它们时再引入选择器，那时 `confirmBeforeReceiving` 会变成其中一个分支。
+
+默认关还有一个理由：这是局域网内的可信工具，用户按下发送就是想让它到，中间多一次点击是纯粹的摩擦。想收紧的人自己打开开关。
 
 ### 6.5 视觉风格
 
@@ -829,6 +1010,32 @@ CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - **字体**：系统默认（Windows `Segoe UI` / Android `Roboto`）。**不打包自定义字体** —— 系统字体对各语言（含 CJK、阿拉伯语、emoji）的覆盖最完整，打包字体反而会出现豆腐块
 - **设备图标**：Windows/Android 客户端内置 4 个矢量图标（desktop/laptop/phone/tablet），用户可切换
 - **头像**：默认用设备图标 + 名称首字母生成的彩色圆形；支持上传自定义图片
+- **未读角标**：**红色**（`colorScheme.error`），不是主题主色。主色 `#0EA5E9` 是这个 App 到处都在用的强调色，一个数字画在上面读起来像装饰；红色是这个界面里唯一表示「有东西在等你」的颜色，而且它本来就是这个主题为这件事保留的语义色——深色模式下会自动切成更亮的那一档，不会在深底上留一块暗红
+
+### 6.6 新消息提醒（声音）
+
+收到消息时响一声，Windows 和 Android 都要。由 **Settings → Notifications → Message notifications** 控制，默认开。
+
+**响两次的来源，一个出口。** 消息可以经由两条路径到达：
+
+| 来源 | 流 | 说明 |
+|---|---|---|
+| 文字消息 | `LanService.messagesArrived` | §4.3 的 `message` 帧，落库后广播 |
+| 文件/文件夹 | `TransferService.offers` | 消息行由传输引擎自己写（§5.1），不经过 `LanService` |
+
+文件不是次一等的消息：§5.1 里它本来就是一个消息加一个背后的 transfer，对话页也把它们画在一起。只听文字的提示音，恰恰会在用户最可能不在场的那次到达上保持沉默。
+
+两条流可以共用一个消费者，是因为这个消费者**只消费不产生**——它不写库、不广播、不触发任何会再发消息的东西。这跟 §6.2 未读角标当初那个坑（读消息 → 标记已读 → 广播 → 刷新 → 再标记已读）不是一回事：那里两个总线互为因果，这里只有一个终点。
+
+`messagesArrived` 是**另一条流**而不是 `messagesChanged` 上的标志位，因为后者问的是「这个 peer 的历史变了没有」，它在我们自己发的消息被 ack、被重排、被写库时同样会触发。挂在它上面的提示音会在每次自己的消息被确认时响一声。
+
+**重复帧不响。** §4.2 的重试意味着同一个 `msgId` 可能到达多次；对端重拨不是对端有新话说。`messagesArrived` 只在 `isNew` 时发出。
+
+**节流 2 秒（`kChimeCooldown`）。** §5.2 让消息在投递前一直算「欠着」，所以一台离开一小时的设备在重连的瞬间会把积压全部交出来，三十条消息落在同一秒里。三十声不是三十倍提醒，是一声噪音加一个被用户关掉的开关。2 秒短到「前后脚打的两条消息」仍然听得出是两条，长到能吃掉一次积压。这是去抖，不是摘要——不做「3 条新消息」那种汇总，那需要一套 UI，而对话页已经把它显示了。
+
+**用系统提示音，不带自己的音频资源。** Windows 走 Flutter 自带的 `SystemSound.play(SystemSoundType.alert)`；Android **不能**走这条——框架文档明说 `alert` 在移动端被忽略（「Desktop platforms are the only platforms that support a system alert sound」），调用正常返回、什么都不响，这是功能缺失最难被发现的一种形态——所以 Android 走 `MainActivity.kt` 里的 `RingtoneManager`。用系统音而不是打包一个 mp3：提示音就是这个设备对「有东西来了」的既定表达，而且它天然受通知音量、静音开关和勿扰模式管辖。一个局域网小工具没有重要到可以绕过这些。
+
+**已知边界**：进程不在前台且已被系统挂起时不会响（Android 没有前台服务，`backgroundService` 设置项尚未接线）。这是 v1 的取舍，不假装成别的。
 
 ---
 
@@ -990,7 +1197,7 @@ output-localization-file: app_localizations.dart
 
 ### 9.2 v1 的缓解措施（低成本，建议实现）
 
-- 文件接收**默认需要用户确认**（仅图片小于阈值可自动接收）
+- 文件接收**默认不确认，直接接收**（Settings 里的 `Confirm before receiving` 可以打开；§6.4 说明了为什么默认是这一边）
 - 路径穿越防护（§4.6），防止恶意文件名写到系统目录
 - 单帧 header 上限 1 MB，防止内存攻击
 - 同一 `deviceId` 的并发连接数限制（如 4），防止连接耗尽
@@ -1130,7 +1337,7 @@ feijian/
 | **M2** 控制连接 + 文字消息 | 单端口监听、hello 握手、连接去重、心跳重连、消息帧收发、SQLite 落库、对话页、送达回执、**手动添加 IP（§4.1.4，提前自 M5 实现）** | 双向收发中英文/emoji 消息；重启后历史仍在；断网重连后消息不丢不重；AP 隔离下可用 IP 直连并收发 | 1.5d |
 | **M3** 文件传输 | offer/accept/data/done、进度条、取消、`.part` 临时文件、重名处理、图片缩略图与全屏查看、拖拽发送、剪贴板粘贴 | 传输 1GB 文件内存占用平稳；传图片可内联预览；拖拽文件夹可直接发送；取消后无残留 | 2d |
 | **M4** 文件夹 + 离线消息 | 目录清单、递归重建、发送队列、上线补发、失败重试 | 传含子目录的文件夹结构完整；对方离线时发消息，上线后自动收到 | 1.5d |
-| **M5** 打磨与打包 | 设置页全项、自动接收策略、Windows 托盘/自启/防火墙规则、Android 前台服务/通知、空状态排查提示、Inno Setup 安装包 | 非开发人员可在两台干净电脑/手机间直接安装使用 | 1.5d |
+| **M5** 打磨与打包 | 设置页全项、Windows 托盘/自启/防火墙规则、**Android 前台服务**、新消息提示音（§6.6，已实现）与 Android 通知栏、空状态排查提示、Inno Setup 安装包 | 非开发人员可在两台干净电脑/手机间直接安装使用 | 1.5d |
 | **M6** iOS（后续） | 权限声明、UI 适配、mDNS 发现 | — | 待评估 |
 
 **M0–M5 合计约 8.5 人天**，可交付可日常使用的 Windows + Android 版本。

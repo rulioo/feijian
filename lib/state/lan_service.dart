@@ -60,6 +60,22 @@ class LanService {
   /// the database is the source of truth, and the event just says "look again".
   Stream<String> get messagesChanged => _messagesChanged.stream;
 
+  final StreamController<String> _arrived =
+      StreamController<String>.broadcast();
+
+  /// A peer sent us something and it had not been seen before.
+  ///
+  /// A second stream rather than a flag on [messagesChanged], because the two
+  /// answer different questions and only this one is about *the other end*.
+  /// `messagesChanged` fires when a status advances on a message this device
+  /// sent, when one is requeued, when our own text is stored — a listener that
+  /// rang a bell on it would ring every time our own message was acknowledged.
+  ///
+  /// A duplicate does not fire it: §4.2's retries mean the same `msgId` can
+  /// arrive several times, and a peer redialling must not sound like a peer
+  /// with something new to say.
+  Stream<String> get messagesArrived => _arrived.stream;
+
   // `late` so the `onListen` callback can reach back into `this` — a plain
   // field initializer runs before the object exists.
   late final StreamController<Set<String>> _onlinePeers =
@@ -278,6 +294,7 @@ class LanService {
     await stopping;
 
     await _messagesChanged.close();
+    await _arrived.close();
     await _onlinePeers.close();
   }
 
@@ -313,6 +330,9 @@ class LanService {
     }
     if (isNew) {
       _markChanged(incoming.peerId);
+      if (!_arrived.isClosed) {
+        _arrived.add(incoming.peerId);
+      }
     }
   }
 
@@ -383,6 +403,16 @@ class LanService {
   // --- Discovery ------------------------------------------------------------
 
   /// Writes what peers announced about themselves and dials the ones that are up.
+  ///
+  /// A peer that has just said it is up is also §5.2 rule 3's other flush: the
+  /// control connection coming up is one moment the offline queue is drained,
+  /// and this is the one that does not depend on the connection going down and
+  /// up again — a socket that survived the peer's own restart, or a device whose
+  /// announces reach us while its handshake has already been done.
+  ///
+  /// Only a peer whose announce **changed** is flushed. The same event also
+  /// fires when a device goes away, and dialling or draining on every repeat of
+  /// an unchanged announce would put a query behind each one.
   Future<void> _absorbAnnounces() async {
     if (_disposed) {
       return;
@@ -390,7 +420,8 @@ class LanService {
     for (final Peer peer in discovery.peers) {
       final String fingerprint = '${peer.name}|${peer.icon.wire}|'
           '${peer.deviceType.wire}|${peer.os}|${peer.lastIp}|${peer.isOnline}';
-      if (_recorded[peer.id] != fingerprint) {
+      final bool changed = _recorded[peer.id] != fingerprint;
+      if (changed) {
         _recorded[peer.id] = fingerprint;
         try {
           await _peers.recordAnnounce(peer, at: _clock());
@@ -400,6 +431,14 @@ class LanService {
           _recorded.remove(peer.id);
           _log('could not record ${peer.id}: $error');
           continue;
+        }
+        if (peer.isOnline) {
+          // Inside the `changed` branch rather than beside it, because the
+          // condition that makes an announce worth acting on is the same one
+          // that makes it worth draining the queue behind: a device repeating
+          // itself every few seconds is not news, and a query behind each
+          // repeat would be the price of every peer on the network.
+          await _flushPending(peer.id);
         }
       }
       if (peer.isOnline) {

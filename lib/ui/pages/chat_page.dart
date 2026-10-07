@@ -33,10 +33,14 @@ import 'image_viewer_page.dart';
 ///
 /// A file message draws as a card, a finished picture as a thumbnail that opens
 /// the fullscreen viewer (§6.3), and a transfer still moving as a bar over the
-/// same card. Files go out from the paperclip or by being dropped on the
-/// conversation, both of which end in [_offerFiles]. The folder button and the
-/// clipboard shortcuts are still to come, and both say so rather than doing
-/// nothing.
+/// same card. A folder is a card of its own: a name, a count and the task's own
+/// progress, because §4.6 makes it a message over many files rather than one of
+/// them (see [FolderCard]).
+///
+/// Files go out from the paperclip or by being dropped on the conversation, both
+/// of which end in [_offerFiles]; a folder from the folder button or a dropped
+/// one, which end in [_sendFolder]. The clipboard shortcuts are still to come,
+/// and the one that is not wired says so rather than doing nothing.
 class ChatPage extends ConsumerStatefulWidget {
   const ChatPage({super.key});
 
@@ -150,6 +154,71 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     await _offerFiles(paths);
   }
 
+  /// Asks the operating system for a folder and offers it here — §6.3.
+  ///
+  /// Nothing is validated here: whether the folder can be read is the walk's
+  /// answer, in [TransferService.sendFolder], and answering it twice would be
+  /// two places that disagree the moment one changes.
+  Future<void> _attachFolder() async {
+    final String? path = await ref.read(fileChooserProvider).pickFolder();
+    if (!mounted || path == null) {
+      return;
+    }
+    await _sendFolder(path);
+  }
+
+  /// Offers one folder to the open conversation — §4.6's folder rules.
+  ///
+  /// The peer is read here rather than passed in, for the same reason
+  /// [_offerFiles] reads it: the dialog is modal over the whole app, and a
+  /// device picked in the other pane while it was open would make the folder
+  /// belong to a conversation it was not dropped on.
+  ///
+  /// A failure is told, not thrown onward: the user asked for a folder, and the
+  /// walk may take a second on a big one, so a refusal has to arrive as an answer
+  /// rather than as a page that did nothing.
+  Future<void> _sendFolder(String path) async {
+    final String? peerId = _peerId;
+    if (peerId == null) {
+      return;
+    }
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      _tell(AppLocalizations.of(context).sendUnavailable);
+      return;
+    }
+
+    try {
+      await transfers.sendFolder(peerId: peerId, directory: Directory(path));
+    } on TransferException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _tell(_refusal(error, SafeName.fileName(path)));
+      debugPrint('[chat] folder offer failed for $path: $error');
+    }
+  }
+
+  /// What to say about a refusal, in the terms the user can act on.
+  ///
+  /// Shared by the file and folder paths because the two refusals differ only in
+  /// which of the engine's reasons they carry: `busy` is the app's own ceiling on
+  /// concurrent transfers and naming the file would suggest the file is the
+  /// problem; `unsupported` is §4.6 rule 5's manifest too large to send, which is
+  /// about the folder's shape rather than about this device; `notFound` is a file
+  /// or folder the walk could not read. Everything else is the generic sentence,
+  /// with the name in it so the user knows which of a dropped five it was.
+  String _refusal(TransferException error, String name) {
+    final AppLocalizations l10n = AppLocalizations.of(context);
+    return switch (error.reason) {
+      RejectReason.busy => l10n.fileTooManyTransfers,
+      RejectReason.unsupported => l10n.folderTooManyFiles,
+      RejectReason.notFound => l10n.folderUnreadable,
+      _ => l10n.fileSendFailed(name),
+    };
+  }
+
   /// Offers each of [paths] to the open conversation, one transfer apiece.
   ///
   /// One offer per file rather than one transfer carrying many: §4.6's handshake
@@ -183,12 +252,10 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       if (!mounted) {
         return;
       }
-      // Checked here rather than left to the engine's file-not-found, because a
-      // folder is something the user can see and did mean to send — "Could not
-      // send Photos" would be a worse answer than saying folders wait for a
-      // later version. A drop is the likeliest way to arrive with one.
+      // A dropped folder is the same thing the folder button asks for, and a
+      // drop is the likeliest way to arrive with one.
       if (FileSystemEntity.isDirectorySync(path)) {
-        _tell(AppLocalizations.of(context).fileFolderNotYet);
+        await _sendFolder(path);
         continue;
       }
 
@@ -198,15 +265,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         if (!mounted) {
           return;
         }
-        final AppLocalizations l10n = AppLocalizations.of(context);
-        // `busy` is the engine's own ceiling on concurrent transfers, and it is
-        // about the app rather than about this file — naming the file would
-        // suggest the file is the problem and a second try would work.
-        _tell(
-          error.reason == RejectReason.busy
-              ? l10n.fileTooManyTransfers
-              : l10n.fileSendFailed(SafeName.fileName(path)),
-        );
+        _tell(_refusal(error, SafeName.fileName(path)));
         debugPrint('[chat] offer failed for $path: $error');
       }
     }
@@ -305,6 +364,30 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     _tell(AppLocalizations.of(context).fileCancelled);
   }
 
+  /// Stops a whole folder — the same rule as [_cancelTransfer], one level up.
+  ///
+  /// By the task's own id rather than through a lookup: §4.6 gives a folder one
+  /// `xferId` for all of it, and the transfer row is where that id lives, so the
+  /// card already holds the name the engine answers to. A file's card has to go
+  /// through [TransferService.cancelAttachment] because the attachment id it
+  /// holds is the local one, which the wire has never heard of.
+  ///
+  /// What stops is the *task*: the file being written is abandoned with its
+  /// `.part`, and the sender is told not to send the ones behind it (§4.6). The
+  /// files already landed stay — they are on disk and in the attachment rows.
+  Future<void> _cancelTask(Transfer task) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.cancel(task.id);
+    if (!mounted) {
+      return;
+    }
+    _tell(AppLocalizations.of(context).fileCancelled);
+  }
+
   /// Agrees to an offer that is waiting in the conversation — §9.2.
   ///
   /// The same decision the dialog over the whole app asks for, reached the
@@ -331,6 +414,38 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       return;
     }
     await transfers.declineAttachment(attachment.id);
+    if (mounted) {
+      _tell(AppLocalizations.of(context).fileActionResultDecline);
+    }
+  }
+
+  /// Says yes to a whole folder — §9.2, where an offer is answered once.
+  ///
+  /// The task's id rather than an attachment's, because §4.6 gives a folder one
+  /// `xferId` for all of it and the transfer row is where that id lives. There is
+  /// no partial accept: the receiver takes the tree or turns it down, and every
+  /// file in it is written under one root the service picks (§7.1).
+  Future<void> _acceptTask(Transfer task) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.accept(task.id);
+    if (mounted) {
+      _tell(AppLocalizations.of(context).fileActionResultAccept);
+    }
+  }
+
+  /// Turns a whole folder down. The sender is told which of the two happened,
+  /// as it is for a file, so its bubble can say so rather than time out.
+  Future<void> _declineTask(Transfer task) async {
+    final TransferService? transfers =
+        ref.read(transferServiceProvider).valueOrNull;
+    if (transfers == null) {
+      return;
+    }
+    await transfers.decline(task.id);
     if (mounted) {
       _tell(AppLocalizations.of(context).fileActionResultDecline);
     }
@@ -426,9 +541,14 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   static List<Attachment> _picturesIn(ChatState state) {
     final List<Attachment> pictures = <Attachment>[];
     for (final Message message in state.messages) {
-      final Attachment? file = state.attachments[message.id];
-      if (file != null && file.isImage && file.isOpenable) {
-        pictures.add(file);
+      // Every file of every message, which for a folder is all the photographs
+      // inside it: they are pictures this app received either way, and a
+      // received folder is not a reason to be unable to swipe through them.
+      for (final Attachment file in state.attachments[message.id] ??
+          const <Attachment>[]) {
+        if (file.isImage && file.isOpenable) {
+          pictures.add(file);
+        }
       }
     }
     return pictures;
@@ -495,7 +615,17 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     if (confirmed != true || !mounted) {
       return;
     }
-    await ref.read(chatProvider(peer.id).notifier).clearHistory();
+    // The write can fail — a foreign key that refuses the delete, a locked
+    // database — and when it does, the conversation is still on screen. Saying
+    // 「History cleared」 over it is the one outcome the user cannot act on, so
+    // the failure gets its own line rather than the same silence.
+    bool cleared = false;
+    try {
+      await ref.read(chatProvider(peer.id).notifier).clearHistory();
+      cleared = true;
+    } on Object {
+      cleared = false;
+    }
     if (!mounted) {
       return;
     }
@@ -503,7 +633,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text(l10n.historyCleared),
+          content: Text(cleared ? l10n.historyCleared : l10n.historyClearFailed),
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 2),
         ),
@@ -729,10 +859,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                   ref.read(chatProvider(peer.id).notifier).setDraft(value),
               onSend: () => unawaited(_send()),
               onAttachFile: () => unawaited(_attachFiles()),
-              // Says what is missing rather than opening a picker that then
-              // refuses. Sending a whole folder is M4 — §4.6's `relPath` field is
-              // the part of the protocol it needs, and it is not implemented.
-              onAttachFolder: () => _tell(l10n.fileFolderNotYet),
+              onAttachFolder: () => unawaited(_attachFolder()),
             ),
           ],
         ),
@@ -791,36 +918,70 @@ class _ChatPageState extends ConsumerState<ChatPage> {
           // Reversed: index 0 is the newest, at the bottom.
           final Message message =
               state.messages[state.messages.length - 1 - index];
-          final Attachment? file = state.attachments[message.id];
+          final List<Attachment> files =
+              state.attachments[message.id] ?? const <Attachment>[];
+          // A folder is not one of its files, and is not drawn through one:
+          // §4.6 makes it a message and a task over many, so the card gets the
+          // whole list and the task instead of a single row.
+          final bool folder = message.type == MessageType.folder;
+          final Attachment? file = folder ? null : files.firstOrNull;
+          final Transfer? task = folder ? state.tasks[message.id] : null;
           // An offer this device has been sent and has not answered. The
           // direction is the message's, not the attachment's: §5.1 gives an
           // attachment no direction of its own, and both ends of a transfer
-          // write the same shape of row.
-          final bool answering = file != null &&
-              message.direction == MessageDirection.incoming &&
-              file.state == TransferState.offered;
-          // §6.3's exclamation is one affordance over two kinds of message. A
-          // file's retry cannot go through the message's — that one requeues the
-          // row for the outbox, which is text-only — so the branch is here,
-          // keyed on the rows rather than on the card's buttons: cancelled and
-          // declined are failed *messages* too, and the engine is the thing that
-          // knows what to do with all three.
-          final VoidCallback onRetry = file != null &&
-                  message.status == MessageStatus.failed
-              ? () => unawaited(_retryTransfer(file))
-              : () => unawaited(
-                    ref.read(chatProvider(peer.id).notifier).retry(message.id),
-                  );
+          // write the same shape of row. A folder's answer is one answer about
+          // the whole of it — §9.2 has no partial accept — so it is asked of the
+          // task rather than of any file.
+          final bool answering = message.direction == MessageDirection.incoming &&
+              (folder
+                  ? task?.state == TransferState.offered
+                  : file?.state == TransferState.offered);
+          // §6.3's exclamation, which is one affordance over three kinds of
+          // message.
+          //
+          // **A folder gets none.** §5.2's retry re-reads the source, and a
+          // folder's source is not on any row this page holds — §4.6 keeps a
+          // folder's files on the sender's disk and puts only the manifest on
+          // the wire. So what a user does about a failed folder is send it
+          // again, which the folder button is for. Null rather than a callback
+          // that does nothing: an icon that answers a tap with silence is worse
+          // than an icon that is plainly not pressable.
+          //
+          // **A file's goes to the engine**, because the message's retry cannot
+          // carry it: [ChatController.retry] puts the row back in the outbox,
+          // and the outbox is text-only. Keyed on the rows rather than on the
+          // card's buttons, because cancelled and declined are failed
+          // *messages* too (§4.5 has no third word for them), and the engine is
+          // the thing that knows what to do with all three.
+          //
+          // **Text takes the outbox**, which is the one path that really does
+          // resend the same message (§5.2).
+          final VoidCallback? onRetry;
+          if (folder) {
+            onRetry = null;
+          } else if (file != null && message.status == MessageStatus.failed) {
+            onRetry = () => unawaited(_retryTransfer(file));
+          } else {
+            onRetry = () => unawaited(
+                  ref.read(chatProvider(peer.id).notifier).retry(message.id),
+                );
+          }
+          final bool openable = folder
+              ? files.any((Attachment f) => f.isOpenable)
+              : file != null && file.isOpenable;
           return MessageBubble(
             key: ValueKey<String>(message.id),
             message: message,
             attachment: file,
+            files: files,
+            task: task,
             onRetry: onRetry,
-            onDelete: () => unawaited(
-              ref
-                  .read(chatProvider(peer.id).notifier)
-                  .deleteMessage(message.id),
-            ),
+            // Not `unawaited`: the bubble's menu waits for the answer so its
+            // toast can be the truth rather than a hope.
+            onDelete: () =>
+                ref.read(chatProvider(peer.id).notifier).deleteMessage(
+                      message.id,
+                    ),
             // Only once the bytes are here. The card offers whatever it is
             // given, and Open on a file that is half arrived is a button that
             // opens half a file.
@@ -833,16 +994,40 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             onSaveAs: file == null || !file.isOpenable || !canSaveAs
                 ? null
                 : () => unawaited(_saveAs(file)),
+            // A folder's two, per file. The card decides whether to offer them
+            // at all; a folder with nothing arrived yet offers neither.
+            onOpenFile: openable ? (Attachment f) => unawaited(_openFile(f)) : null,
+            onSaveFile: openable && canSaveAs
+                ? (Attachment f) => unawaited(_saveAs(f))
+                : null,
             // Offered while there is something to stop. A file that is here, or
             // that never will be, has no transfer left to cancel, and the button
             // would be a promise the service cannot keep. An unanswered offer is
             // the third case: it has something to stop, but "Cancel" and
-            // "Decline" would be two words for one decision.
-            onCancel: file == null || file.isFinished || answering
+            // "Decline" would be two words for one decision — and for a folder
+            // that case is the task's, since answering it is one decision about
+            // the whole of it.
+            onCancel: answering || (folder ? task?.isFinished ?? true : false)
                 ? null
-                : () => unawaited(_cancelTransfer(file)),
-            onAccept: answering ? () => unawaited(_acceptOffer(file)) : null,
-            onDecline: answering ? () => unawaited(_declineOffer(file)) : null,
+                : folder
+                    ? () => unawaited(_cancelTask(task!))
+                    : file == null || file.isFinished
+                        ? null
+                        : () => unawaited(_cancelTransfer(file)),
+            // A folder's answer is the task's, for the same reason its cancel
+            // is: one `xferId` for the whole of it, and a decision about all of
+            // it. [TransferService.acceptAttachment] cannot reach it — a folder
+            // transfer has no `attachment_id` to be found by.
+            onAccept: !answering
+                ? null
+                : folder
+                    ? () => unawaited(_acceptTask(task!))
+                    : () => unawaited(_acceptOffer(file!)),
+            onDecline: !answering
+                ? null
+                : folder
+                    ? () => unawaited(_declineTask(task!))
+                    : () => unawaited(_declineOffer(file!)),
             onOpenImage: file == null
                 ? null
                 : () => unawaited(_openImage(pictures, file)),

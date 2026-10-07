@@ -61,8 +61,7 @@ import 'app_localizations_en.dart';
 /// be consistent with the languages listed in the AppLocalizations.supportedLocales
 /// property.
 abstract class AppLocalizations {
-  AppLocalizations(String locale)
-      : localeName = intl.Intl.canonicalizedLocale(locale.toString());
+  AppLocalizations(String locale) : localeName = intl.Intl.canonicalizedLocale(locale.toString());
 
   final String localeName;
 
@@ -70,8 +69,7 @@ abstract class AppLocalizations {
     return Localizations.of<AppLocalizations>(context, AppLocalizations)!;
   }
 
-  static const LocalizationsDelegate<AppLocalizations> delegate =
-      _AppLocalizationsDelegate();
+  static const LocalizationsDelegate<AppLocalizations> delegate = _AppLocalizationsDelegate();
 
   /// A list of this localizations delegate along with the default localizations
   /// delegates.
@@ -83,8 +81,7 @@ abstract class AppLocalizations {
   /// Additional delegates can be added by appending to this list in
   /// MaterialApp. This list does not have to be used at all if a custom list
   /// of delegates is preferred or required.
-  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates =
-      <LocalizationsDelegate<dynamic>>[
+  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates = <LocalizationsDelegate<dynamic>>[
     delegate,
     GlobalMaterialLocalizations.delegate,
     GlobalCupertinoLocalizations.delegate,
@@ -92,7 +89,9 @@ abstract class AppLocalizations {
   ];
 
   /// A list of this localizations delegate's supported locales.
-  static const List<Locale> supportedLocales = <Locale>[Locale('en')];
+  static const List<Locale> supportedLocales = <Locale>[
+    Locale('en')
+  ];
 
   /// No description provided for @appName.
   ///
@@ -388,6 +387,12 @@ abstract class AppLocalizations {
   /// **'Deleted from this device'**
   String get messageDeleted;
 
+  /// No description provided for @messageDeleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not delete this message'**
+  String get messageDeleteFailed;
+
   /// No description provided for @actionDelete.
   ///
   /// In en, this message translates to:
@@ -405,6 +410,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'History cleared'**
   String get historyCleared;
+
+  /// No description provided for @historyClearFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not clear the history'**
+  String get historyClearFailed;
 
   /// No description provided for @fileSizeBytes.
   ///
@@ -508,12 +519,6 @@ abstract class AppLocalizations {
   /// **'Too many files are already moving. Wait for one to finish and try again.'**
   String get fileTooManyTransfers;
 
-  /// No description provided for @fileFolderNotYet.
-  ///
-  /// In en, this message translates to:
-  /// **'Sending a folder is not in this version yet. Send the files inside it instead.'**
-  String get fileFolderNotYet;
-
   /// No description provided for @fileDropToSend.
   ///
   /// In en, this message translates to:
@@ -523,7 +528,7 @@ abstract class AppLocalizations {
   /// No description provided for @fileOfferTitle.
   ///
   /// In en, this message translates to:
-  /// **'Incoming file'**
+  /// **'Incoming file or folder'**
   String get fileOfferTitle;
 
   /// No description provided for @fileOfferBody.
@@ -658,29 +663,17 @@ abstract class AppLocalizations {
   /// **'Download folder'**
   String get settingsDownloadFolder;
 
-  /// No description provided for @settingsAutoAccept.
+  /// No description provided for @settingsConfirmReceiving.
   ///
   /// In en, this message translates to:
-  /// **'Auto-accept files'**
-  String get settingsAutoAccept;
+  /// **'Confirm before receiving'**
+  String get settingsConfirmReceiving;
 
-  /// No description provided for @settingsAutoAcceptOff.
+  /// No description provided for @settingsConfirmReceivingHint.
   ///
   /// In en, this message translates to:
-  /// **'Ask every time'**
-  String get settingsAutoAcceptOff;
-
-  /// No description provided for @settingsAutoAcceptImages.
-  ///
-  /// In en, this message translates to:
-  /// **'Accept images under {size} MB'**
-  String settingsAutoAcceptImages(int size);
-
-  /// No description provided for @settingsAutoAcceptTrusted.
-  ///
-  /// In en, this message translates to:
-  /// **'Accept everything from trusted devices'**
-  String get settingsAutoAcceptTrusted;
+  /// **'Ask before accepting a file or photo. Off means anything sent to this device is received straight away.'**
+  String get settingsConfirmReceivingHint;
 
   /// No description provided for @settingsListenPort.
   ///
@@ -879,10 +872,39 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Close'**
   String get close;
+
+  /// No description provided for @folderFileCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 file} other{{count} files}}'**
+  String folderFileCount(int count);
+
+  /// No description provided for @folderTooManyFiles.
+  ///
+  /// In en, this message translates to:
+  /// **'This folder holds too many files to describe in one go. Send a part of it instead.'**
+  String get folderTooManyFiles;
+
+  /// No description provided for @folderUnreadable.
+  ///
+  /// In en, this message translates to:
+  /// **'That folder cannot be read on this device.'**
+  String get folderUnreadable;
+
+  /// No description provided for @folderSomeFilesFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 file in this folder did not arrive} other{{count} files in this folder did not arrive}}'**
+  String folderSomeFilesFailed(int count);
+
+  /// No description provided for @folderMoreFiles.
+  ///
+  /// In en, this message translates to:
+  /// **'…and {count} more'**
+  String folderMoreFiles(int count);
 }
 
-class _AppLocalizationsDelegate
-    extends LocalizationsDelegate<AppLocalizations> {
+class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
   const _AppLocalizationsDelegate();
 
   @override
@@ -891,23 +913,24 @@ class _AppLocalizationsDelegate
   }
 
   @override
-  bool isSupported(Locale locale) =>
-      <String>['en'].contains(locale.languageCode);
+  bool isSupported(Locale locale) => <String>['en'].contains(locale.languageCode);
 
   @override
   bool shouldReload(_AppLocalizationsDelegate old) => false;
 }
 
 AppLocalizations lookupAppLocalizations(Locale locale) {
+
+
   // Lookup logic when only language code is specified.
   switch (locale.languageCode) {
-    case 'en':
-      return AppLocalizationsEn();
+    case 'en': return AppLocalizationsEn();
   }
 
   throw FlutterError(
-      'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-      'an issue with the localizations generation tool. Please file an issue '
-      'on GitHub with a reproducible sample app and the gen-l10n configuration '
-      'that was used.');
+    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+    'an issue with the localizations generation tool. Please file an issue '
+    'on GitHub with a reproducible sample app and the gen-l10n configuration '
+    'that was used.'
+  );
 }

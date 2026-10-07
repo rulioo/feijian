@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:feijian/core/constants.dart';
 import 'package:feijian/core/transfer/safe_name.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -132,6 +133,126 @@ void main() {
     test('a name that is nothing but a long extension is still bounded', () {
       final String safe = SafeName.fileName('.${'x' * 400}');
       expect(utf8.encode(safe).length, lessThanOrEqualTo(SafeName.maxBytes));
+    });
+  });
+
+  group('a folder transfer\'s relative path', () {
+    test('an ordinary nested path survives', () {
+      expect(SafeName.relPath('photos/2024/holiday.jpg'),
+          'photos/2024/holiday.jpg');
+    });
+
+    test('the platform separator does not survive into the stored path', () {
+      // The value has to mean the same thing on both ends, and a backslash
+      // cannot: it is a separator here and an ordinary character on the peer.
+      expect(SafeName.relPath(r'photos\2024\holiday.jpg'),
+          'photos/2024/holiday.jpg');
+      expect(SafeName.relPath(r'photos/2024\holiday.jpg'),
+          'photos/2024/holiday.jpg');
+    });
+
+    test('a climb is dropped rather than turned into a file called file', () {
+      // `fileName('..')` answers the fallback, which is right for a *name* and
+      // wrong for a *segment*: it would invent a file out of a traversal
+      // attempt. A segment that names no place is a segment with nothing in it.
+      expect(SafeName.relPath('../../etc/shadow'), 'etc/shadow');
+      expect(SafeName.relPath('a/../b.txt'), 'a/b.txt');
+      expect(SafeName.relPath('./a/./b.txt'), 'a/b.txt');
+      expect(SafeName.relPath(r'..\..\Windows\win.ini'), 'Windows/win.ini');
+    });
+
+    test('an absolute path becomes a relative one', () {
+      expect(SafeName.relPath('/etc/passwd'), 'etc/passwd');
+      // The drive letter survives as an ordinary component, the same way the
+      // colon is stripped out of `C:evil.txt` by the single-component rules: it
+      // is a harmless directory called `C` under the download root, and giving
+      // it its own rule would be a second answer to a question `_component`
+      // already answers.
+      expect(SafeName.relPath(r'C:\Users\me\notes.txt'),
+          'C/Users/me/notes.txt');
+    });
+
+    test('each segment gets the single-component rules', () {
+      expect(SafeName.relPath('a/CON/b.txt'), 'a/_CON/b.txt');
+      expect(SafeName.relPath('a/report.../b.txt'), 'a/report/b.txt');
+      expect(SafeName.relPath('a/x:y/b.txt'), 'a/xy/b.txt');
+      expect(SafeName.relPath('a/\u0000b/b.txt'), 'a/b/b.txt');
+    });
+
+    test('a path that names no place at all is refused', () {
+      expect(SafeName.relPath(''), isNull);
+      expect(SafeName.relPath('/'), isNull);
+      expect(SafeName.relPath('.'), isNull);
+      expect(SafeName.relPath('..'), isNull);
+      expect(SafeName.relPath('../..'), isNull);
+      expect(SafeName.relPath('//'), isNull);
+    });
+
+    test('a path nested to the limit is accepted and one deeper is not', () {
+      final String atLimit =
+          <String>[...List<String>.filled(kMaxPathDepth - 1, 'd'), 'f.txt']
+              .join('/');
+      expect(SafeName.segments(atLimit), hasLength(kMaxPathDepth));
+
+      final String tooDeep =
+          <String>[...List<String>.filled(kMaxPathDepth, 'd'), 'f.txt']
+              .join('/');
+      expect(SafeName.segments(tooDeep), isNull);
+    });
+
+    test('a path longer than the byte limit is refused', () {
+      // Refused rather than truncated: a truncated path is a *different* place,
+      // and the receiver would create the folder somewhere the sender never
+      // named while the sender's own tree said otherwise.
+      //
+      // Every component is fitted to [SafeName.maxBytes] on its own, so the
+      // total is only reachable through depth — which is why this is ten long
+      // names rather than one enormous one.
+      // Ten 200-character names become ten 120-byte ones, which joins to about
+      // 1.2 KB — over the limit, and still well inside the depth cap, so this is
+      // the byte bound being tested and not the other one.
+      final String long =
+          <String>[...List<String>.filled(10, 'a' * 200), 'f.txt'].join('/');
+      expect(SafeName.segments(long), isNull);
+    });
+
+    test('nothing it returns can escape the directory it is joined onto', () {
+      const List<String> hostile = <String>[
+        '',
+        '.',
+        '..',
+        '/',
+        '\\',
+        '//',
+        r'..\..',
+        '../../../etc/shadow',
+        r'C:\..\..\x\y.txt',
+        'a/../../b.txt',
+        '/dev/null',
+        r'\\server\share\file.txt',
+        '\u0000',
+        'CON/CON.txt',
+        'a//b///c.txt',
+        'a/ /b.txt',
+      ];
+
+      for (final String raw in hostile) {
+        final List<String>? parts = SafeName.segments(raw);
+        if (parts == null) {
+          continue; // refused outright, which is always safe
+        }
+        final String joined = parts.join('/');
+        expect(parts, isNotEmpty, reason: 'for ${jsonEncode(raw)}');
+        expect(joined, isNot(startsWith('/')), reason: 'for ${jsonEncode(raw)}');
+        for (final String part in parts) {
+          expect(part, isNotEmpty, reason: 'for ${jsonEncode(raw)}');
+          expect(part, isNot(anyOf('.', '..')),
+              reason: 'for ${jsonEncode(raw)}');
+          expect(part, isNot(contains('/')), reason: 'for ${jsonEncode(raw)}');
+          expect(part, isNot(contains(r'\')), reason: 'for ${jsonEncode(raw)}');
+          expect(part, isNot(contains(':')), reason: 'for ${jsonEncode(raw)}');
+        }
+      }
     });
   });
 

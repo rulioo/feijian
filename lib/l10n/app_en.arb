@@ -1,25 +1,21 @@
 {
   "@@locale": "en",
-
   "appName": "Feijian",
-
   "navDevices": "Devices",
   "navSettings": "Settings",
-
   "myDeviceSectionTitle": "THIS DEVICE",
   "youLabel": "You",
   "editDeviceName": "Change your device name",
-
   "devicesOnNetworkCount": "{count, plural, =0{NO OTHER DEVICES} =1{ON THE NETWORK · 1} other{ON THE NETWORK · {count}}}",
   "@devicesOnNetworkCount": {
     "placeholders": {
-      "count": { "type": "int" }
+      "count": {
+        "type": "int"
+      }
     }
   },
-
   "statusOnline": "Online",
   "statusOffline": "Offline",
-
   "scanningTitle": "Scanning for devices on your network...",
   "scanningHintIntro": "Make sure:",
   "scanningHintRunning": "Other devices have Feijian running",
@@ -27,7 +23,9 @@
   "scanningHintFirewall": "Your firewall allows Feijian (TCP and UDP port {port})",
   "@scanningHintFirewall": {
     "placeholders": {
-      "port": { "type": "int" }
+      "port": {
+        "type": "int"
+      }
     }
   },
   "discoveryFailedTitle": "Device discovery is not running",
@@ -36,53 +34,61 @@
   "addDeviceByIp": "Add device by IP",
   "rescan": "Rescan",
   "sendFileAction": "Send a file",
-
   "addDeviceDialogTitle": "Add device by IP",
   "addDeviceFieldLabel": "IP address",
   "addDeviceFieldHint": "192.168.1.100",
   "addDeviceInvalidIp": "Enter a valid IP address",
   "actionCancel": "Cancel",
   "actionAdd": "Add",
-
   "addDeviceConnecting": "Connecting to {target}...",
   "@addDeviceConnecting": {
     "placeholders": {
-      "target": { "type": "String" }
+      "target": {
+        "type": "String"
+      }
     }
   },
   "addDeviceAdded": "Added {name}",
   "@addDeviceAdded": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
   "addDeviceUnreachable": "Could not reach a device at {target}. Check that Feijian is running on it and that its address has not changed.",
   "@addDeviceUnreachable": {
     "placeholders": {
-      "target": { "type": "String" }
+      "target": {
+        "type": "String"
+      }
     }
   },
   "addDeviceSelf": "That address is this device.",
   "addDeviceOffline": "Cannot add a device: the network service is not running.",
-
   "removeDevice": "Remove device",
   "removeDeviceConfirm": "Remove {name} from the device list? The conversation stays on this device.",
   "@removeDeviceConfirm": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
   "deviceRemoved": "Removed {name}",
   "@deviceRemoved": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
-
   "chatEmptyWithPeer": "No messages yet. Say hello to {name}.",
   "@chatEmptyWithPeer": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
   "chatEmptyNoPeer": "Select a device on the left to start chatting.",
@@ -93,47 +99,53 @@
   "peerOfflineNotice": "{name} is offline. Messages and files will be sent when they are back.",
   "@peerOfflineNotice": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
   "backTooltip": "Back",
   "moreActions": "More actions",
   "viewPeerInfo": "Device info",
   "clearHistory": "Clear history",
-
   "messageActionCopy": "Copy text",
   "messageActionDelete": "Delete for me",
   "messageCopied": "Copied",
   "messageDeleted": "Deleted from this device",
+  "messageDeleteFailed": "Could not delete this message",
   "actionDelete": "Delete",
   "clearHistoryConfirm": "Delete every message in this conversation from this device? {name} keeps their own copy.",
   "@clearHistoryConfirm": {
     "placeholders": {
-      "name": { "type": "String" }
+      "name": {
+        "type": "String"
+      }
     }
   },
   "historyCleared": "History cleared",
-
+  "historyClearFailed": "Could not clear the history",
   "fileSizeBytes": "{count, plural, =1{1 byte} other{{count} bytes}}",
   "@fileSizeBytes": {
     "placeholders": {
-      "count": { "type": "int" }
+      "count": {
+        "type": "int"
+      }
     }
   },
   "filePercent": "{percent}%",
   "@filePercent": {
     "placeholders": {
-      "percent": { "type": "int" }
+      "percent": {
+        "type": "int"
+      }
     }
   },
-
   "transferWaiting": "Waiting",
   "transferAwaitingAnswer": "Waiting for your answer",
   "transferDone": "Completed",
   "transferFailed": "Failed",
   "transferCancelled": "Cancelled",
   "transferDeclined": "Declined",
-
   "fileOpen": "Open",
   "fileSaveAs": "Save as...",
   "fileOpenFailed": "There is no app on this device that can open this file.",
@@ -141,37 +153,40 @@
   "fileSaved": "Saved",
   "fileSaveFailed": "The file could not be saved.",
   "fileCancelled": "Transfer cancelled",
-
   "fileSendFailed": "Could not send {file}.",
   "@fileSendFailed": {
     "placeholders": {
-      "file": { "type": "String" }
+      "file": {
+        "type": "String"
+      }
     }
   },
   "fileTooManyTransfers": "Too many files are already moving. Wait for one to finish and try again.",
-  "fileFolderNotYet": "Sending a folder is not in this version yet. Send the files inside it instead.",
   "fileDropToSend": "Drop to send",
-
-  "fileOfferTitle": "Incoming file",
+  "fileOfferTitle": "Incoming file or folder",
   "fileOfferBody": "{name} wants to send you {file} ({size})",
   "@fileOfferBody": {
     "placeholders": {
-      "name": { "type": "String" },
-      "file": { "type": "String" },
-      "size": { "type": "String" }
+      "name": {
+        "type": "String"
+      },
+      "file": {
+        "type": "String"
+      },
+      "size": {
+        "type": "String"
+      }
     }
   },
   "fileAccept": "Accept",
   "fileDecline": "Decline",
   "fileActionResultAccept": "Accepted",
   "fileActionResultDecline": "Declined",
-
   "peerInfoId": "Device ID",
   "peerInfoAddress": "Address",
   "peerInfoType": "Type",
   "peerInfoSystem": "System",
   "peerInfoStatus": "Status",
-
   "settingsTitle": "Settings",
   "settingsSectionProfile": "Profile",
   "settingsSectionFiles": "Files",
@@ -180,20 +195,12 @@
   "settingsSectionSystem": "System",
   "settingsSectionLanguage": "Language",
   "settingsSectionAbout": "About",
-
   "settingsDisplayName": "Display name",
   "settingsDeviceIcon": "Device icon",
   "settingsAvatar": "Avatar",
   "settingsDownloadFolder": "Download folder",
-  "settingsAutoAccept": "Auto-accept files",
-  "settingsAutoAcceptOff": "Ask every time",
-  "settingsAutoAcceptImages": "Accept images under {size} MB",
-  "@settingsAutoAcceptImages": {
-    "placeholders": {
-      "size": { "type": "int" }
-    }
-  },
-  "settingsAutoAcceptTrusted": "Accept everything from trusted devices",
+  "settingsConfirmReceiving": "Confirm before receiving",
+  "settingsConfirmReceivingHint": "Ask before accepting a file or photo. Off means anything sent to this device is received straight away.",
   "settingsListenPort": "Listen port",
   "settingsMulticastAddress": "Multicast address",
   "settingsEnabledInterfaces": "Network interfaces",
@@ -207,17 +214,14 @@
   "settingsVersion": "Version",
   "settingsProtocolVersion": "Protocol version",
   "settingsLicenses": "Open source licenses",
-
   "deviceIconDesktop": "Desktop",
   "deviceIconLaptop": "Laptop",
   "deviceIconPhone": "Phone",
   "deviceIconTablet": "Tablet",
-
   "deviceTypeWindows": "Windows",
   "deviceTypeAndroid": "Android",
   "deviceTypeIos": "iOS",
   "deviceTypeUnknown": "Unknown",
-
   "messageStatusPending": "Waiting to send",
   "messageStatusSent": "Sent",
   "messageStatusDelivered": "Delivered",
@@ -229,11 +233,38 @@
   "unreadMessagesCount": "{count, plural, =1{1 unread message} other{{count} unread messages}}",
   "@unreadMessagesCount": {
     "placeholders": {
-      "count": { "type": "int" }
+      "count": {
+        "type": "int"
+      }
     }
   },
-
   "notImplementedTitle": "Not implemented yet",
   "notImplementedBody": "This arrives in a later milestone.",
-  "close": "Close"
+  "close": "Close",
+  "folderFileCount": "{count, plural, =1{1 file} other{{count} files}}",
+  "@folderFileCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "folderTooManyFiles": "This folder holds too many files to describe in one go. Send a part of it instead.",
+  "folderUnreadable": "That folder cannot be read on this device.",
+  "folderSomeFilesFailed": "{count, plural, =1{1 file in this folder did not arrive} other{{count} files in this folder did not arrive}}",
+  "folderMoreFiles": "…and {count} more",
+  "@folderMoreFiles": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@folderSomeFilesFailed": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

@@ -207,6 +207,54 @@ void main() {
         reason: 'a duplicate ack does not undo a delivery',
       );
     });
+
+    test('a new message is announced, and a duplicate is not', () async {
+      // The signal the notification sound hangs on. It is a second stream
+      // rather than a flag on `messagesChanged` because that one also fires for
+      // a status advancing on a message *this* device sent, and for a requeue —
+      // a chime on it would ring every time our own message was acknowledged.
+      // What it must also not do is ring twice for one message: §4.2's retries
+      // send the same `msgId` again whenever an ack goes missing, and a peer
+      // redialling is not a peer with something new to say.
+      await introduce();
+
+      final List<String> arrived = <String>[];
+      final StreamSubscription<String> listening =
+          b.service.messagesArrived.listen(arrived.add);
+      addTearDown(listening.cancel);
+
+      final Message? first = await a.service.sendText(
+        peerId: b.id,
+        text: '一条新消息',
+      );
+      await waitUntil(
+        () => arrived.length == 1,
+        describe: 'b to announce the arrival',
+      );
+      expect(arrived, <String>[a.id]);
+
+      expect(
+        a.service.manager.sendMessage(
+          b.id,
+          MessagePayload(
+            msgId: first!.id,
+            ts: first.createdAt,
+            text: '一条新消息',
+          ),
+        ),
+        isTrue,
+      );
+      await waitUntil(
+        () => a.service.manager.pendingAckCount == 0,
+        describe: 'the duplicate to be acknowledged',
+      );
+
+      expect(
+        arrived,
+        <String>[a.id],
+        reason: 'still one — the second frame said nothing new',
+      );
+    });
   });
 
   group('the offline queue (§5.2)', () {
@@ -239,6 +287,39 @@ void main() {
             rows.length == 1 && rows.single.status == MessageStatus.delivered,
         describe: 'the queued message to be acknowledged',
       );
+    });
+
+    test('is flushed by a fresh announce, with the link already up', () async {
+      await introduce();
+
+      // b drops off the list and comes back. Nothing closes the control
+      // connection across either event — nothing in §4.1 releases a peer for
+      // going quiet — so `peerConnected` never fires a second time and the
+      // announce is the only trigger §5.2 rule 3 has left. Without it a message
+      // written in that window would sit owed until the next disconnect.
+      a.announceOffline(b.id);
+      expect(a.service.isConnected(b.id), isTrue,
+          reason: 'the connection has to have survived for this to be the case '
+              'the test is about');
+
+      // Written straight into the queue rather than through `sendText`, which
+      // would send it: the link is up, and this is about the moment the queue
+      // outlives that.
+      await a.chat.saveOutgoing(
+        msgId: 'queued-1',
+        peerId: b.id,
+        text: '回来了吗',
+        now: DateTime.now(),
+      );
+
+      a.announce(b);
+
+      final List<Message> delivered = await waitForValue(
+        () => historyOf(b, a),
+        (List<Message> rows) => rows.isNotEmpty,
+        describe: 'the queued message to be flushed by the announce alone',
+      );
+      expect(delivered.single.text, '回来了吗');
     });
 
     test('flushes in the order it was written', () async {

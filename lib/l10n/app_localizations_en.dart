@@ -65,8 +65,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get discoveryFailedTitle => 'Device discovery is not running';
 
   @override
-  String get discoveryFailedBody =>
-      'This device could not open the port it listens on, so the list below cannot fill no matter who is on your network. Press Rescan to try again.';
+  String get discoveryFailedBody => 'This device could not open the port it listens on, so the list below cannot fill no matter who is on your network. Press Rescan to try again.';
 
   @override
   String get discoveryFailedDetail => 'Details';
@@ -117,8 +116,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addDeviceSelf => 'That address is this device.';
 
   @override
-  String get addDeviceOffline =>
-      'Cannot add a device: the network service is not running.';
+  String get addDeviceOffline => 'Cannot add a device: the network service is not running.';
 
   @override
   String get removeDevice => 'Remove device';
@@ -139,8 +137,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get chatEmptyNoPeer =>
-      'Select a device on the left to start chatting.';
+  String get chatEmptyNoPeer => 'Select a device on the left to start chatting.';
 
   @override
   String get composerHint => 'Type a message...';
@@ -184,6 +181,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get messageDeleted => 'Deleted from this device';
 
   @override
+  String get messageDeleteFailed => 'Could not delete this message';
+
+  @override
   String get actionDelete => 'Delete';
 
   @override
@@ -193,6 +193,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get historyCleared => 'History cleared';
+
+  @override
+  String get historyClearFailed => 'Could not clear the history';
 
   @override
   String fileSizeBytes(int count) {
@@ -235,8 +238,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get fileSaveAs => 'Save as...';
 
   @override
-  String get fileOpenFailed =>
-      'There is no app on this device that can open this file.';
+  String get fileOpenFailed => 'There is no app on this device that can open this file.';
 
   @override
   String get fileMissing => 'The file is no longer on this device.';
@@ -256,18 +258,13 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get fileTooManyTransfers =>
-      'Too many files are already moving. Wait for one to finish and try again.';
-
-  @override
-  String get fileFolderNotYet =>
-      'Sending a folder is not in this version yet. Send the files inside it instead.';
+  String get fileTooManyTransfers => 'Too many files are already moving. Wait for one to finish and try again.';
 
   @override
   String get fileDropToSend => 'Drop to send';
 
   @override
-  String get fileOfferTitle => 'Incoming file';
+  String get fileOfferTitle => 'Incoming file or folder';
 
   @override
   String fileOfferBody(String name, String file, String size) {
@@ -338,19 +335,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsDownloadFolder => 'Download folder';
 
   @override
-  String get settingsAutoAccept => 'Auto-accept files';
+  String get settingsConfirmReceiving => 'Confirm before receiving';
 
   @override
-  String get settingsAutoAcceptOff => 'Ask every time';
-
-  @override
-  String settingsAutoAcceptImages(int size) {
-    return 'Accept images under $size MB';
-  }
-
-  @override
-  String get settingsAutoAcceptTrusted =>
-      'Accept everything from trusted devices';
+  String get settingsConfirmReceivingHint => 'Ask before accepting a file or photo. Off means anything sent to this device is received straight away.';
 
   @override
   String get settingsListenPort => 'Listen port';
@@ -362,8 +350,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsEnabledInterfaces => 'Network interfaces';
 
   @override
-  String get settingsEnabledInterfacesHint =>
-      'Uncheck virtual adapters (Hyper-V, VMware, WSL) if some devices are missing from the list.';
+  String get settingsEnabledInterfacesHint => 'Uncheck virtual adapters (Hyper-V, VMware, WSL) if some devices are missing from the list.';
 
   @override
   String get settingsNotifications => 'Message notifications';
@@ -378,8 +365,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsBackgroundService => 'Stay reachable in background';
 
   @override
-  String get settingsBackgroundServiceHint =>
-      'Shows a permanent notification. Without it, messages cannot be received while the app is in the background.';
+  String get settingsBackgroundServiceHint => 'Shows a permanent notification. Without it, messages cannot be received while the app is in the background.';
 
   @override
   String get settingsLanguage => 'App language';
@@ -436,8 +422,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get historyLoadFailed => 'Could not load this conversation.';
 
   @override
-  String get sendUnavailable =>
-      'Cannot send messages: the network service is not running.';
+  String get sendUnavailable => 'Cannot send messages: the network service is not running.';
 
   @override
   String get loadingOlderMessages => 'Loading earlier messages...';
@@ -461,4 +446,37 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get close => 'Close';
+
+  @override
+  String folderFileCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count files',
+      one: '1 file',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get folderTooManyFiles => 'This folder holds too many files to describe in one go. Send a part of it instead.';
+
+  @override
+  String get folderUnreadable => 'That folder cannot be read on this device.';
+
+  @override
+  String folderSomeFilesFailed(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count files in this folder did not arrive',
+      one: '1 file in this folder did not arrive',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String folderMoreFiles(int count) {
+    return '…and $count more';
+  }
 }

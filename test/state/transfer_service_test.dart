@@ -532,19 +532,230 @@ void main() {
       expect(a.service.active, isEmpty);
     });
 
-    test('a peer with no connection fails rather than waiting', () async {
-      // Never introduced. The offer has nowhere to go, and the honest outcome is
-      // a failed bubble the user can retry rather than a transfer that sits at
-      // pending until the app closes.
+    test('a peer with no connection leaves the file owed, not failed', () async {
+      // Never introduced. The offer has nowhere to go — and §5.2 rule 5 says
+      // that is a debt, not a failure: the bubble shows a clock, the peer is
+      // asked the moment it is back, and the user never has to find the file a
+      // second time.
       final File source = await a.fileOf('lonely.bin', bytesOf(1024));
       final Transfer sent =
           await a.service.sendFile(peerId: b.id, file: source);
 
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'the attempt to fold up',
+      );
+      expect((await a.transfers.byId(sent.id))!.state, TransferState.pending);
+      expect(
+        (await a.chat.page(b.id)).single.status,
+        MessageStatus.pending,
+        reason: 'a clock, not a red cross',
+      );
+      expect(await b.transfers.byId(sent.id), isNull,
+          reason: 'nothing was offered, so nothing is on the other side');
+    });
+  });
+
+  group('a file for a peer that is away (§5.2 rule 5)', () {
+    test('stops being owed the moment its offer is on the wire', () async {
+      // Everything below rests on this: the queue is read off the rows, so an
+      // offer that has gone out has to leave `pending` behind in the same
+      // breath. A row that still read `pending` with its offer in flight would
+      // be offered a second time by the next announce — the peer refuses the
+      // duplicate it already has, and the sender, waiting for an answer to *it*,
+      // ends a transfer that is going perfectly well.
+      await a.connectTo(b);
+      final File source = await a.fileOf('unanswered.bin', bytesOf(2048));
+      final Transfer sent =
+          await a.service.sendFile(peerId: b.id, file: source);
+
+      // Left unanswered on purpose, so the state is read while it is the truth
+      // rather than in the instant before the receipt lands.
+      final Transfer offered = await b.nextOffer();
+      expect(offered.id, sent.id);
+      await a.reachState(sent.id, TransferState.offered,
+          describe: 'the offer to be recorded as sent');
+
+      expect(await a.transfers.owedOutgoing(b.id), isEmpty);
+      expect(a.service.active, hasLength(1));
+    });
+
+    test('goes, under its own xferId, when that peer comes back', () async {
+      final Uint8List content = bytesOf(64 * 1024, seed: 7);
+      final File source = await a.fileOf('later.bin', content);
+      final Transfer sent =
+          await a.service.sendFile(peerId: b.id, file: source);
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'the file to be owed',
+      );
+
+      await a.connectTo(b);
+
+      // The same transfer, not a new one: §5.2 rule 5 re-sends *the offer the
+      // peer never got*, so the user's bubble keeps its identity and its clock
+      // turns into a tick.
+      final Transfer offered = await b.nextOffer();
+      expect(offered.id, sent.id);
+      expect(offered.direction, MessageDirection.incoming);
+
+      await b.service.accept(offered.id);
+      await a.reachState(sent.id, TransferState.done,
+          describe: 'the owed file to cross');
+      expect(await b.inboxFile('later.bin'), content);
+      expect(
+        (await a.chat.page(b.id)).single.status,
+        MessageStatus.delivered,
+      );
+    });
+
+    test('is written off, and says so, when the file is gone', () async {
+      final File source = await a.fileOf('vanishes.bin', bytesOf(1024));
+      final Transfer sent =
+          await a.service.sendFile(peerId: b.id, file: source);
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'the file to be owed',
+      );
+      await source.delete();
+
+      await a.connectTo(b);
       await a.reachState(sent.id, TransferState.failed,
-          describe: 'the send to fail');
-      expect(await a.chat.page(b.id), hasLength(1),
-          reason: 'the bubble stays, and says it did not work');
-      expect(a.service.active, isEmpty);
+          describe: 'the give-up');
+
+      // Nothing was offered, so nothing has to be taken back: the peer has
+      // never heard this `xferId`, and a `file_cancel` naming it would be a
+      // frame about a transfer it cannot know about.
+      expect(b.offers, isEmpty);
+      expect(await b.transfers.byId(sent.id), isNull);
+
+      final Attachment? attachment = await a.transfers.attachmentFor(sent.id);
+      expect(attachment!.state, TransferState.failed);
+      expect(
+        (await a.chat.page(b.id)).single.status,
+        MessageStatus.failed,
+        reason: 'the bubble can say why when it is pressed',
+      );
+    });
+
+    test('is written off when the file has changed since it was picked',
+        () async {
+      final File source = await a.fileOf('grew.bin', bytesOf(1024));
+      final Transfer sent =
+          await a.service.sendFile(peerId: b.id, file: source);
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'the file to be owed',
+      );
+      await source.writeAsBytes(bytesOf(4096, seed: 2), flush: true);
+
+      await a.connectTo(b);
+      await a.reachState(sent.id, TransferState.failed,
+          describe: 'the give-up');
+      expect(b.offers, isEmpty);
+    });
+
+    test('is written off when the row it came from has no path at all',
+        () async {
+      // Reachable through the repository, the way `retryAttachment`'s own
+      // no-path test reaches it: `beginOutgoing` takes a nullable path. There is
+      // nothing to read a file from, and handing the empty string to `File`
+      // would fail as whatever the platform makes of that rather than as this.
+      final Transfer orphan = await a.transfers.beginOutgoing(
+        xferId: 'nopath',
+        peerId: b.id,
+        fileName: 'nopath.bin',
+        totalSize: 1024,
+        localPath: null,
+        now: DateTime.now(),
+      );
+
+      await a.connectTo(b);
+      await a.reachState(orphan.id, TransferState.failed,
+          describe: 'the give-up');
+      expect(b.offers, isEmpty);
+    });
+
+    test('a folder away from its peer goes whole when that peer is back',
+        () async {
+      // A folder is the case §5.2 rule 5 matters most for: §6.3.3's card offers
+      // a failed folder no retry, so before M4 a folder aimed at a phone that
+      // was momentarily away could only be sent again by finding it by hand.
+      final Directory folder = await a.folderOf('photos', <String, List<int>>{
+        'one.txt': bytesOf(2048, seed: 1),
+        'sub/two.txt': bytesOf(3072, seed: 2),
+      });
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: folder);
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'the folder to be owed',
+      );
+      final Transfer owed = (await a.transfers.byId(sent.id))!;
+      expect(owed.state, TransferState.pending);
+      expect(
+        await a.transfers.attachmentsForMessage(owed.messageId!),
+        hasLength(2),
+        reason: 'the files are still on the rows the re-offer rebuilds from',
+      );
+
+      await a.connectTo(b);
+
+      final Transfer offered = await b.nextOffer();
+      expect(offered.id, sent.id);
+      await a.reachState(sent.id, TransferState.offered,
+          describe: 'the offer to be recorded as sent');
+      expect(await a.transfers.owedOutgoing(b.id), isEmpty,
+          reason: 'a folder in flight is not a folder still owed');
+      await b.service.accept(offered.id);
+      await a.reachState(sent.id, TransferState.done,
+          describe: 'the owed folder to cross');
+      expect(await b.inboxFile('photos/one.txt'), bytesOf(2048, seed: 1));
+      expect(await b.inboxFile('photos/sub/two.txt'), bytesOf(3072, seed: 2));
+    });
+
+    test('offers no more at once than the peer will take, then the rest',
+        () async {
+      // Four files dropped on a phone that is away, and §4.6's ceiling of three.
+      // The fourth must not be offered while three are out — the peer answers a
+      // fourth with `busy`, and a `busy` is an ending — so it waits for one of
+      // the three to finish, which is what the release hook is for.
+      final List<File> sources = <File>[
+        for (int i = 0; i < kMaxConcurrentXfers + 1; i++)
+          await a.fileOf('many$i.bin', bytesOf(4096, seed: i)),
+      ];
+      final List<Transfer> sent = <Transfer>[
+        for (final File source in sources)
+          await a.service.sendFile(peerId: b.id, file: source),
+      ];
+      await waitUntil(
+        () => a.service.active.isEmpty,
+        describe: 'all four to be owed',
+      );
+
+      // Answering as they arrive: four offers queued at a receiver that nobody
+      // is sitting in front of would leave the last one waiting for a person.
+      final StreamSubscription<Transfer> answers =
+          b.service.offers.listen((Transfer offer) {
+        unawaited(b.service.accept(offer.id));
+      });
+      addTearDown(answers.cancel);
+
+      await a.connectTo(b);
+      for (final Transfer transfer in sent) {
+        await a.reachState(transfer.id, TransferState.done,
+            describe: '${transfer.id} to cross');
+      }
+      expect(await b.inbox.list().toList(), hasLength(kMaxConcurrentXfers + 1));
+      // Draining the queue is triggered by each transfer that finishes as well
+      // as by the connection, so it runs several times over one backlog — and
+      // every one of those runs reads the same rows. One offer per transfer is
+      // the property that has to survive that.
+      expect(
+        b.offers.map((Transfer offer) => offer.id).toSet(),
+        hasLength(b.offers.length),
+        reason: 'one offer each, however many times the queue was drained',
+      );
     });
   });
 
@@ -793,6 +1004,380 @@ void main() {
       expect(a.service.active, hasLength(kMaxConcurrentXfers));
     });
   });
+
+  group('a folder crossing', () {
+    test('arrives as a tree, one message and one card per file', () async {
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('holiday', <String, List<int>>{
+        'beach.jpg': bytesOf(40 * 1024, seed: 11),
+        'notes.txt': bytesOf(300, seed: 12),
+        'sub/deep.bin': bytesOf(9 * 1024, seed: 13),
+        // No bytes in it, and the one thing a file-by-file transfer cannot
+        // learn from a file: §4.6 rule 4 rebuilds it from the manifest.
+        'empty/': <int>[],
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      final Transfer offered = await b.nextOffer();
+      expect(offered.id, sent.id);
+      expect(offered.state, TransferState.offered);
+      expect(offered.isIncoming, isTrue);
+      expect(offered.bytesTotal, 40 * 1024 + 300 + 9 * 1024);
+
+      await b.service.accept(offered.id);
+      await b.reachState(offered.id, TransferState.done,
+          describe: 'the folder to arrive');
+      await a.reachState(sent.id, TransferState.done,
+          describe: 'the sender to be told');
+
+      // The tree, rebuilt — the two files under `sub` and the empty directory
+      // included.
+      final Directory landed = Directory(
+        '${b.inbox.path}${Platform.pathSeparator}holiday',
+      );
+      expect(await treeIn(landed), <String, bool>{
+        'beach.jpg': false,
+        'notes.txt': false,
+        'sub': true,
+        'sub/deep.bin': false,
+        'empty': true,
+      });
+      expect(
+        await File('${landed.path}${Platform.pathSeparator}sub'
+                '${Platform.pathSeparator}deep.bin')
+            .readAsBytes(),
+        bytesOf(9 * 1024, seed: 13),
+      );
+
+      // One message for the folder, one attachment per *file*.
+      final List<Message> chat = await b.chat.page(a.id);
+      expect(chat.single.type, MessageType.folder);
+      expect(chat.single.text, 'holiday',
+          reason: 'a folder message carries the name and nothing else — the '
+              'size and the files live on the attachments');
+      expect(chat.single.status, MessageStatus.delivered);
+
+      final List<Attachment> files =
+          await b.transfers.attachmentsForMessage(chat.single.id);
+      expect(files.map((Attachment f) => f.relPath),
+          <String>['beach.jpg', 'notes.txt', 'sub/deep.bin'],
+          reason: 'one per file, in the order the folder shows them — and none '
+              'for the empty directory, which has no bytes to describe');
+      expect(files.every((Attachment f) => f.state == TransferState.done),
+          isTrue);
+      expect(files.every((Attachment f) => f.transferred == f.size), isTrue);
+
+      // The ending is the task's, and §5.1.1 gives it no attachment to carry it.
+      final Map<String, Transfer> tasks =
+          await b.transfers.tasksForMessages(<String>[chat.single.id]);
+      expect(tasks[chat.single.id]!.attachmentId, isNull);
+      expect(tasks[chat.single.id]!.state, TransferState.done);
+
+      // Nothing left running on either side, and nothing on disk but the files.
+      expect(a.service.active, isEmpty);
+      expect(b.service.active, isEmpty);
+      expect(await a.transfers.unfinished(), isEmpty);
+      expect(await b.transfers.unfinished(), isEmpty);
+    });
+
+    test('two files of one name in different places land apart', () async {
+      // The case the per-file `relPath` exists for: §4.6 rule 3 gives every file
+      // in a folder the same `xferId`, so a receiver that keyed on the id alone
+      // would write the second of these over the first — a file of the right
+      // length that neither side ever sent.
+      await a.connectTo(b);
+      final Uint8List first = bytesOf(6 * 1024, seed: 21);
+      final Uint8List second = bytesOf(6 * 1024, seed: 22);
+      final Directory source = await a.folderOf('two', <String, List<int>>{
+        'a/same.bin': first,
+        'b/same.bin': second,
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      await b.service.accept((await b.nextOffer()).id);
+      await b.reachState(sent.id, TransferState.done,
+          describe: 'both files to arrive');
+
+      final String root = '${b.inbox.path}${Platform.pathSeparator}two';
+      expect(await File('$root${Platform.pathSeparator}a'
+              '${Platform.pathSeparator}same.bin').readAsBytes(),
+          first);
+      expect(await File('$root${Platform.pathSeparator}b'
+              '${Platform.pathSeparator}same.bin').readAsBytes(),
+          second);
+    });
+
+    test('a file of no bytes arrives on the notice alone', () async {
+      // §4.6.1's zero-byte case, inside a folder: there is no chunk to carry a
+      // `relPath`, so the sender's `file_done` is the only frame that ever names
+      // the file — and the receiver has to build the file's sink from it.
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('mixed', <String, List<int>>{
+        'nothing.txt': <int>[],
+        'something.txt': bytesOf(4096, seed: 31),
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      await b.service.accept((await b.nextOffer()).id);
+      await b.reachState(sent.id, TransferState.done,
+          describe: 'the empty file and the other one to arrive');
+
+      final String root = '${b.inbox.path}${Platform.pathSeparator}mixed';
+      expect(await File('$root${Platform.pathSeparator}nothing.txt').length(), 0);
+      expect(
+        await File('$root${Platform.pathSeparator}something.txt').readAsBytes(),
+        bytesOf(4096, seed: 31),
+      );
+    });
+
+    test('a folder of empty directories is a task with no files', () async {
+      // A legal message with a task and zero attachments (§5.1.1), and the shape
+      // that breaks anything assuming a folder has files in it: nothing is ever
+      // sent after the acceptance, so the task ends on the acceptance itself.
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('hollow', <String, List<int>>{
+        'one/': <int>[],
+        'one/two/': <int>[],
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      await b.service.accept((await b.nextOffer()).id);
+      await b.reachState(sent.id, TransferState.done,
+          describe: 'a folder with nothing in it to finish');
+      await a.reachState(sent.id, TransferState.done,
+          describe: 'the sender to hear the same');
+
+      final Directory landed = Directory(
+        '${b.inbox.path}${Platform.pathSeparator}hollow',
+      );
+      expect(await treeIn(landed), <String, bool>{'one': true, 'one/two': true});
+      final Message message = (await b.chat.page(a.id)).single;
+      expect(await b.transfers.attachmentsForMessage(message.id), isEmpty);
+      expect(message.status, MessageStatus.delivered);
+    });
+
+    test('one file that changed under the sender is written off, the rest go',
+        () async {
+      // §4.6 rule 3's per-file ending, and the reason a folder keeps going: the
+      // file `aaa.bin` is rewritten after the walk and before the acceptance, so
+      // the sender's own size check refuses it — and the folder is still worth
+      // sending, because `zzz.bin` is not.
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('mixed', <String, List<int>>{
+        'aaa.bin': bytesOf(4096, seed: 41),
+        'zzz.bin': bytesOf(4096, seed: 42),
+      });
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      final Transfer offered = await b.nextOffer();
+
+      // The walk has happened and the manifest is on the wire; the file behind
+      // it changes before anything is read.
+      await File('${source.path}${Platform.pathSeparator}aaa.bin')
+          .writeAsBytes(bytesOf(2048, seed: 43), flush: true);
+
+      await b.service.accept(offered.id);
+      await b.reachState(offered.id, TransferState.failed,
+          describe: 'the folder to end failed');
+      await a.reachState(sent.id, TransferState.failed,
+          describe: 'the sender to end failed too');
+
+      final String root = '${b.inbox.path}${Platform.pathSeparator}mixed';
+      expect(await treeIn(Directory(root)), <String, bool>{'zzz.bin': false});
+      expect(await File('$root${Platform.pathSeparator}zzz.bin').readAsBytes(),
+          bytesOf(4096, seed: 42));
+
+      // The one that landed reads `done` and the one that did not reads
+      // `failed`: a card that hid the file that arrived behind the task that
+      // failed is the answer §5.1.1 exists to refuse.
+      final Message message = (await b.chat.page(a.id)).single;
+      final List<Attachment> files =
+          await b.transfers.attachmentsForMessage(message.id);
+      expect(
+        <String, TransferState>{
+          for (final Attachment file in files)
+            file.relPath!: file.state,
+        },
+        <String, TransferState>{
+          'aaa.bin': TransferState.failed,
+          'zzz.bin': TransferState.done,
+        },
+      );
+      expect(message.status, MessageStatus.failed);
+      expect(b.service.active, isEmpty);
+      expect(a.service.active, isEmpty);
+    });
+
+    test('a second folder of one name merges rather than numbering itself',
+        () async {
+      // The file names are what must not collide, and `IncomingFile` already
+      // frees each of them. Numbering the folder instead would put two
+      // directories on disk claiming to be the folder the message names.
+      await a.connectTo(b);
+      final Uint8List once = bytesOf(2048, seed: 51);
+      final Uint8List twice = bytesOf(2048, seed: 52);
+
+      final List<Uint8List> rounds = <Uint8List>[once, twice];
+      for (int round = 0; round < rounds.length; round++) {
+        final Directory source = await a.folderOf('again', <String, List<int>>{
+          'note.txt': rounds[round],
+        });
+        final Transfer sent =
+            await a.service.sendFolder(peerId: b.id, directory: source);
+        await b.service.accept((await b.nextOffer(index: round)).id);
+        await b.reachState(sent.id, TransferState.done,
+            describe: 'folder ${round + 1} to arrive');
+      }
+
+      final Directory landed = Directory(
+        '${b.inbox.path}${Platform.pathSeparator}again',
+      );
+      expect(await treeIn(landed), <String, bool>{
+        'note.txt': false,
+        'note (1).txt': false,
+      });
+      expect(await File('${landed.path}${Platform.pathSeparator}note.txt')
+          .readAsBytes(), once);
+      expect(await File('${landed.path}${Platform.pathSeparator}note (1).txt')
+          .readAsBytes(), twice);
+    });
+
+    test('a folder that cannot be written is refused, not waited on', () async {
+      // The destination is not touched until the user answers the offer — an
+      // offer nobody has accepted must not create directories — so a folder
+      // that cannot be written is found out at the moment of accepting, and the
+      // sender is told there and then. What is being tested is the telling:
+      // `file_reject` rather than silence, because silence is the sender's
+      // offer timeout and a minute of a user watching nothing happen.
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('doomed', <String, List<int>>{
+        'f.bin': bytesOf(1024, seed: 61),
+      });
+      // The download root becomes a *file*, so nothing can be created under it.
+      await b.inbox.delete(recursive: true);
+      await File(b.inbox.path).writeAsBytes(<int>[0], flush: true);
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      await b.service.accept((await b.nextOffer()).id);
+
+      await b.reachState(sent.id, TransferState.failed,
+          describe: 'the folder to be found unwritable');
+      await a.reachState(sent.id, TransferState.failed,
+          describe: 'the sender to hear the refusal');
+
+      expect(await File(b.inbox.path).length(), 1,
+          reason: 'nothing was written anywhere near it');
+      expect(b.service.active, isEmpty);
+      expect(a.service.active, isEmpty);
+    });
+  });
+
+  group('stopping a folder', () {
+    test('a folder stopped while a file is landing keeps what has landed',
+        () async {
+      // 取消后无残留 is about a *half* of something, and a file that landed whole
+      // is not half of anything. What a cancel stops is the files behind it —
+      // and this lands in the window a folder has that a single file does not:
+      // the bytes of a file are all in and it is being renamed into place, so
+      // the cancel cannot mean "throw this file away" without destroying
+      // something the user asked for and that has already arrived.
+      await a.connectTo(b);
+      final Uint8List first = bytesOf(64 * 1024, seed: 71);
+      final Directory source = await a.folderOf('pair', <String, List<int>>{
+        'one.bin': first,
+        'two.bin': bytesOf(64 * 1024, seed: 72),
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      final Transfer offered = await b.nextOffer();
+
+      // The moment the first file is installed and no byte of the second has
+      // been written: the task's byte count is exactly the first file's size.
+      final Completer<void> cancel = Completer<void>();
+      final StreamSubscription<Transfer> watch =
+          b.service.changes.listen((Transfer transfer) {
+        if (!cancel.isCompleted &&
+            transfer.id == offered.id &&
+            transfer.bytesDone == first.length) {
+          cancel.complete();
+        }
+      });
+      addTearDown(watch.cancel);
+
+      await b.service.accept(offered.id);
+      await cancel.future;
+      await b.service.cancel(offered.id);
+
+      await b.reachState(offered.id, TransferState.cancelled,
+          describe: 'the folder to be stopped');
+      await a.reachState(sent.id, TransferState.cancelled,
+          describe: 'the sender to hear the stop');
+
+      final Directory landed = Directory(
+        '${b.inbox.path}${Platform.pathSeparator}pair',
+      );
+      expect(await treeIn(landed), <String, bool>{'one.bin': false},
+          reason: 'the file that landed is not residue, and no .part is either');
+      expect(await File('${landed.path}${Platform.pathSeparator}one.bin')
+          .readAsBytes(), first);
+
+      final Message message = (await b.chat.page(a.id)).single;
+      final List<Attachment> files =
+          await b.transfers.attachmentsForMessage(message.id);
+      expect(
+        <String, TransferState>{
+          for (final Attachment file in files)
+            file.relPath!: file.state,
+        },
+        <String, TransferState>{
+          'one.bin': TransferState.done,
+          'two.bin': TransferState.cancelled,
+        },
+      );
+      // Waited for rather than asserted: the sender is still unwinding the
+      // folder when the row reads `cancelled` — the file it was about to send
+      // has to fail and be tidied first — so an immediate read of [active]
+      // measures the test's own timing.
+      await waitUntil(
+        () => a.service.active.isEmpty && b.service.active.isEmpty,
+        describe: 'both devices to let go of the folder',
+      );
+    });
+
+    test('a folder turned down before it is accepted leaves nothing',
+        () async {
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('unwanted', <String, List<int>>{
+        'f.bin': bytesOf(4096, seed: 81),
+      });
+
+      final Transfer sent =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+      await b.service.decline((await b.nextOffer()).id);
+
+      await b.reachState(sent.id, TransferState.declined,
+          describe: 'the offer to be turned down');
+      // `declined` on the sender too, exactly as a single file is — the refusal
+      // says the user said no, which is not the same as an attempt that failed
+      // and is the ending a retry has to keep apart from one. The *message* is
+      // the failed thing there, since a bubble with nothing in it is what the
+      // user sees and asks again from.
+      await a.reachState(sent.id, TransferState.declined,
+          describe: 'the sender to hear the refusal');
+
+      expect(await pathsIn(b.inbox), isEmpty);
+      expect(b.service.active, isEmpty);
+      expect(a.service.active, isEmpty);
+      expect((await a.chat.page(b.id)).single.status, MessageStatus.failed,
+          reason: 'a declined folder leaves the sender a failed message');
+    });
+  });
 }
 
 /// The paths in [directory], sorted — a `.part` left behind is the difference
@@ -802,6 +1387,32 @@ Future<List<String>> pathsIn(Directory directory) async {
     await for (final FileSystemEntity entity in directory.list()) entity.path,
   ];
   return paths..sort();
+}
+
+/// Everything under [directory], `/`-separated and sorted, with `true` for a
+/// directory — the shape of a folder on disk, which is what a folder transfer is
+/// judged by.
+///
+/// Both kinds are in it because both are what a folder carries: §4.6 rule 4
+/// makes a receiver rebuild the empty directories, and a tree that came back
+/// without one is a tree that came back wrong.
+Future<Map<String, bool>> treeIn(Directory directory) async {
+  final List<FileSystemEntity> entities =
+      await directory.list(recursive: true).toList();
+  final String prefix = directory.path.endsWith(Platform.pathSeparator)
+      ? directory.path
+      : '${directory.path}${Platform.pathSeparator}';
+  final List<MapEntry<String, bool>> entries = <MapEntry<String, bool>>[
+    for (final FileSystemEntity entity in entities)
+      MapEntry<String, bool>(
+        entity.path
+            .substring(prefix.length)
+            .replaceAll(Platform.pathSeparator, '/'),
+        entity is Directory,
+      ),
+  ]..sort((MapEntry<String, bool> a, MapEntry<String, bool> b) =>
+      a.key.compareTo(b.key));
+  return Map<String, bool>.fromEntries(entries);
 }
 
 /// Reproducible bytes, so a mismatch is a mismatch and not a seed.
@@ -924,12 +1535,20 @@ class _Device {
     );
   }
 
-  /// Waits for this device to be offered a file.
-  Future<Transfer> nextOffer({Duration timeout = patience}) {
+  /// Waits for this device's [index]th offer to arrive.
+  ///
+  /// Indexed rather than "the newest one", because [offers] keeps every offer
+  /// this device has had: a device offered two folders still has both, and
+  /// `first` would hand the second test the first offer again — which reads as
+  /// the *sender* stalling, since the offer that was accepted twice never
+  /// moves.
+  Future<Transfer> nextOffer({int index = 0, Duration timeout = patience}) {
     return waitForValue<Transfer?>(
-      () async => offers.isEmpty ? null : offers.first,
+      () async => offers.length <= index ? null : offers[index],
       (Transfer? offer) => offer != null,
-      describe: 'an offer to arrive',
+      describe: index == 0
+          ? 'an offer to arrive'
+          : 'offer ${index + 1} to arrive',
       timeout: timeout,
     ).then((Transfer? offer) => offer!);
   }
@@ -949,6 +1568,17 @@ class _Device {
     ).then((Transfer? transfer) => transfer!);
   }
 
+  /// What landed in [inbox] under a `/`-separated [relPath] — a folder's file
+  /// as much as a single one.
+  ///
+  /// Read back rather than checked off by name: a transfer is judged by the
+  /// bytes on the disk, and a file that arrived empty or half-written is the
+  /// failure this whole layer exists to prevent.
+  Future<Uint8List> inboxFile(String relPath) {
+    final String local = relPath.replaceAll('/', Platform.pathSeparator);
+    return File('${inbox.path}${Platform.pathSeparator}$local').readAsBytes();
+  }
+
   /// A file of [bytes] in a temporary directory, for sending.
   Future<File> fileOf(String name, List<int> bytes) async {
     final Directory directory =
@@ -957,6 +1587,36 @@ class _Device {
     final File file = File('${directory.path}${Platform.pathSeparator}$name');
     await file.writeAsBytes(bytes, flush: true);
     return file;
+  }
+
+  /// A folder of files in a temporary directory, for sending.
+  ///
+  /// [contents] is `relPath -> bytes`, `/`-separated, and a key ending in a
+  /// separator is a directory rather than a file. That last one is not a
+  /// convenience: an empty directory is a thing a folder carries and the walk
+  /// has to be given one to prove it does.
+  Future<Directory> folderOf(
+    String name,
+    Map<String, List<int>> contents,
+  ) async {
+    final Directory parent =
+        await Directory.systemTemp.createTemp('feijian-src-$id-');
+    _scratch.add(parent);
+    final Directory root =
+        Directory('${parent.path}${Platform.pathSeparator}$name');
+    await root.create(recursive: true);
+    for (final MapEntry<String, List<int>> item in contents.entries) {
+      final String path = '${root.path}${Platform.pathSeparator}'
+          '${item.key.replaceAll('/', Platform.pathSeparator)}';
+      if (item.key.endsWith('/')) {
+        await Directory(path).create(recursive: true);
+        continue;
+      }
+      final File file = File(path);
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(item.value, flush: true);
+    }
+    return root;
   }
 
   Future<void> dispose() async {
