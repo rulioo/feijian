@@ -1092,9 +1092,17 @@ Android 8+ 起，App 退到后台数分钟后会被 Doze 冻结，Socket 被挂�
 
 | 文件类型 | 保存位置 |
 |---|---|
-| 图片/视频 | MediaStore → 系统相册 `Pictures/Feijian`、`Movies/Feijian` |
-| 其他文件 | `Downloads/Feijian`（MediaStore Downloads，Android 10+ 无需存储权限） |
+| 所有文件（正式副本） | App 文档目录下的 `Feijian/` —— 这才是 `attachment.localPath` |
+| 图片 | **额外**发布一份到系统相册 `Pictures/Feijian`（MediaStore，Android 10+ 无需权限）—— 已实现 |
+| 视频 | `Movies/Feijian` —— **未实现**（v1 不发视频） |
+| 其他文件 | `Downloads/Feijian`（MediaStore Downloads）—— **未实现**，见下方 TODO |
 | 应用内部临时 | `getExternalFilesDir()` 下的 `.part` 文件 |
+
+**图片为什么存两份**：`attachment.localPath` 必须是真实文件系统路径，五处按路径使用它——打开文件（`existsSync` 守卫 + `OpenFilex.open`）、另存为（`File.copy`）、缩略图（`Image.file`）、大图查看（`FileImage`）、续传时取文件长度（`File.length`）。把它换成 `content://` 会一次性全部失效。所以私有那份仍是 App 的正式副本，相册里是**额外**拷贝。代价是图片占用翻倍；换来的是两者互不牵连——用户在相册里删掉那张图，聊天里对应的消息仍然打得开（见 `lib/platform/gallery_saver.dart`）。
+
+**"该进相册"不能复用 `Attachment.isImage`**：那条规则回答的是"Flutter 能不能解码"（`{png, jpg, jpeg, gif, webp, bmp}`），而 iPhone 发来的 `.heic` 在它眼里是 false。聊天里给它一张文件卡片是对的，相册不收录它就错了——那是用户最可能刚发来的照片。所以另有一条 `isGalleryImage`，取"相机拍出来的照片"这个集合（上面六种加 `heic`/`heif`/`avif`），`svg` 与 `tiff` 排除。两条规则并排写在 `lib/core/models/transfer.dart`。
+
+**文件夹不发布**：一个文件夹到达时整个目录树保留在 `Feijian/` 下，把里面每张图摊平进同一个相册既压掉了结构，又可能一次灌进几百条——不是"把我收到的照片放进相册"要的东西。要放开就是从 `_finishFolderFile` 里调同一个发布函数，那里的 `row` 已经带着名字和 mime。
 
 优先用 **SAF（Storage Access Framework）** 而非 `MANAGE_EXTERNAL_STORAGE` —— 后者会触发 Google Play 的敏感权限审核，且用户授权体验差。
 

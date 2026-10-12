@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../platform/download_path.dart';
+import '../platform/gallery_saver.dart';
 import 'data_providers.dart';
 import 'lan_provider.dart';
 import 'lan_service.dart';
@@ -40,6 +41,20 @@ final FutureProvider<TransferService> transferServiceProvider =
     // platform reports can change while the app runs — a user who plugs in a
     // card and moves the default has it take effect on the next file.
     downloadDirectory: DownloadPath.resolve,
+    // A received picture also goes into the system gallery, so it is somewhere
+    // the user can actually reach it from — §7.1. A no-op answering false on
+    // every platform but Android, which is not an error to be reported.
+    publishImage: ({
+      required String path,
+      required String name,
+      required String? mime,
+    }) =>
+        GallerySaver.save(
+      path: path,
+      name: name,
+      mime: mime,
+      onLog: (String message) => debugPrint('[gallery] $message'),
+    ),
     onLog: (String message) => debugPrint('[xfer] $message'),
   );
 

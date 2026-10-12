@@ -107,6 +107,122 @@ void main() {
     });
   });
 
+  // The gallery rule is a *different* question from the one above it, and these
+  // are the tests that say so. The two agree on most files, which is exactly why
+  // the places they disagree need pinning down.
+  group('a picture belongs in the gallery even when this app cannot draw it',
+      () {
+    test('heic does, though isImage says no to the same file', () {
+      // The whole reason this rule exists. An iPhone's photo is not something
+      // the chat can render — so it shows a file card, correctly — but the
+      // phone's own gallery displays it perfectly, and refusing to publish it
+      // would drop the pictures most likely to be sent.
+      final Attachment heic =
+          attachment(fileName: 'IMG_0421.HEIC', mime: 'image/heic');
+      expect(heic.isGalleryImage, isTrue);
+      expect(heic.isImage, isFalse);
+    });
+
+    test('heif and avif do too', () {
+      expect(attachment(fileName: 'IMG_0421.heif').isGalleryImage, isTrue);
+      expect(attachment(fileName: 'IMG_0421.avif').isGalleryImage, isTrue);
+    });
+
+    test('everything this app can draw is in the gallery as well', () {
+      // The list is a superset by construction, and this is what says so: a
+      // format added to one and forgotten in the other would be a picture that
+      // renders in the chat but never reaches the album.
+      for (final String format in Attachment.extensions) {
+        expect(
+          attachment(fileName: 'photo.$format').isGalleryImage,
+          isTrue,
+          reason: '.$format draws in the chat and must therefore be published',
+        );
+      }
+    });
+  });
+
+  group('and a picture of something that is not a photo does not', () {
+    test('svg is out, though its mime type is image/', () {
+      // A drawing, and a vector one — an album full of icons is the complaint
+      // that gets a feature like this switched off.
+      expect(
+        attachment(fileName: 'logo.svg', mime: 'image/svg+xml').isGalleryImage,
+        isFalse,
+      );
+    });
+
+    test('tiff is out, with svg', () {
+      expect(
+          attachment(fileName: 'scan.tiff', mime: 'image/tiff').isGalleryImage,
+          isFalse);
+    });
+
+    test('a document is not a photo', () {
+      expect(attachment(fileName: 'notes.txt', mime: 'text/plain').isGalleryImage,
+          isFalse);
+      expect(
+          attachment(fileName: 'report.pdf', mime: 'application/pdf')
+              .isGalleryImage,
+          isFalse);
+    });
+
+    test('a name with no type at all is not one', () {
+      expect(attachment(fileName: '.png').isGalleryImage, isFalse);
+      expect(attachment(fileName: 'holiday.png.').isGalleryImage, isFalse);
+      expect(attachment(fileName: 'backup.png.zip').isGalleryImage, isFalse);
+    });
+  });
+
+  group('the mime type the gallery is given is a concrete one', () {
+    test('the extension supplies it when the sender claimed nothing useful',
+        () {
+      // The common case: a sender that says `application/octet-stream` for
+      // everything it sends. MediaStore files the row by this column, so an
+      // `image/*` or a null here would leave the picture in Files, not Photos.
+      expect(
+        attachment(fileName: 'photo.jpg', mime: 'application/octet-stream')
+            .galleryMime,
+        'image/jpeg',
+      );
+      expect(attachment(fileName: 'photo.jpg').galleryMime, 'image/jpeg');
+      expect(attachment(fileName: 'IMG_0421.HEIC').galleryMime, 'image/heic');
+    });
+
+    test('a declared type is believed and normalised', () {
+      expect(attachment(fileName: 'x', mime: 'IMAGE/PNG').galleryMime,
+          'image/png');
+      // Parameters are cut: the column wants a type, not a type and its
+      // arguments.
+      expect(
+        attachment(fileName: 'x.jpg', mime: 'image/jpeg; charset=binary')
+            .galleryMime,
+        'image/jpeg',
+      );
+    });
+
+    test('jpeg is one format under two extensions', () {
+      expect(attachment(fileName: 'a.jpeg').galleryMime, 'image/jpeg');
+      expect(attachment(fileName: 'b.jpg').galleryMime, 'image/jpeg');
+    });
+
+    test('the case of the extension does not reach the answer', () {
+      expect(attachment(fileName: 'IMG_0421.JPG').galleryMime, 'image/jpeg');
+      expect(attachment(fileName: 'shot.WebP').galleryMime, 'image/webp');
+    });
+
+    test('there is none for a file that is not going to the gallery', () {
+      // Null is the caller's signal not to publish at all, so it has to be null
+      // for exactly the files the rule above rejects.
+      expect(attachment(fileName: 'notes.txt').galleryMime, isNull);
+      expect(attachment(fileName: 'logo.svg', mime: 'image/svg+xml').galleryMime,
+          isNull);
+      expect(attachment(fileName: 'scan.tiff', mime: 'image/tiff').galleryMime,
+          isNull);
+      expect(attachment(fileName: 'noextension').galleryMime, isNull);
+    });
+  });
+
   group('progress is a ratio of what was agreed to', () {
     test('an unfinished transfer is how far it has got', () {
       final Attachment moving = attachment(

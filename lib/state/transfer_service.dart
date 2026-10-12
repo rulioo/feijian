@@ -67,11 +67,17 @@ class TransferService {
     this.tuning = const TransferTuning(),
     DateTime Function()? clock,
     void Function(String message)? onLog,
+    Future<bool> Function({
+      required String path,
+      required String name,
+      required String? mime,
+    })? publishImage,
   })  : _manager = manager,
         _transfers = transfers,
         _downloadDirectory = downloadDirectory,
         _clock = clock ?? DateTime.now,
-        _onLog = onLog {
+        _onLog = onLog,
+        _publishImage = publishImage {
     // Subscribed in the constructor, not when the first transfer is asked for
     // (§4.4.2): an offer can arrive at any moment, and the pool closes a data
     // connection nobody is listening for — so a transfer layer that waited to be
@@ -107,6 +113,19 @@ class TransferService {
 
   final DateTime Function() _clock;
   final void Function(String message)? _onLog;
+
+  /// Publishes a received picture where the user can find it — §7.1.
+  ///
+  /// Injected for the same reason [_downloadDirectory] is: this class owns the
+  /// moment the picture lands, and nothing else does, but how to put a file in
+  /// front of the user is a platform question with no answer on Windows and two
+  /// wrong answers on Android below API 29. Null means publishing is off, which
+  /// is what every test that is not about this gets.
+  final Future<bool> Function({
+    required String path,
+    required String name,
+    required String? mime,
+  })? _publishImage;
 
   final List<StreamSubscription<Object?>> _subscriptions =
       <StreamSubscription<Object?>>[];
@@ -2042,6 +2061,70 @@ class TransferService {
     // The sender has nothing left to send; it will close its end when the
     // receipt arrives. This side is done with the socket either way.
     await _releaseIncoming(entry, closeData: true);
+
+    // Deliberately last, deliberately not awaited. The transfer is over in every
+    // sense that matters — the bytes are on disk, the row says `done`, the
+    // sender has its receipt — and a copy into the gallery is not part of
+    // receiving the file. Holding this future open would stall the chain that
+    // processes data frames strictly in order (see the class doc), which for a
+    // folder would stop the next file's chunks behind a copy of the last one's.
+    unawaited(_publishToGallery(entry, path));
+  }
+
+  /// Copies a received picture into the system gallery, if it is one and if
+  /// there is anywhere to put it — §7.1.
+  ///
+  /// Only single files. A folder of photographs would flatten its structure into
+  /// one album and pour hundreds of entries into it, which is not what "put the
+  /// picture I was sent into my photos" asked for, and a folder keeps its own
+  /// arrangement under the download directory where the whole tree is visible.
+  /// Lifting this restriction means calling this from [_finishFolderFile], whose
+  /// `row` already carries the name and mime this has to look up.
+  ///
+  /// Failing is logged and nothing else. The alternative — marking a completed
+  /// transfer failed because a second copy of it could not be written — would
+  /// turn a cosmetic problem into a lie about the user's file.
+  Future<void> _publishToGallery(_Incoming entry, String path) async {
+    final Future<bool> Function({
+      required String path,
+      required String name,
+      required String? mime,
+    })? publish = _publishImage;
+    if (publish == null) {
+      return;
+    }
+
+    // Null for a folder, which is the case this deliberately does not handle:
+    // a folder's files are its attachments, and it has none of its own.
+    final String? attachmentId = entry.transfer.attachmentId;
+    if (attachmentId == null) {
+      return;
+    }
+
+    // Everything below is inside the try, the database read included. Nothing
+    // awaits this future — that is the point of it — so anything that escapes
+    // here is an unhandled error in the zone rather than a failed transfer, and
+    // the case that produces one is not exotic: disposing the service closes the
+    // database, and a publish that was already in flight then reads a closed
+    // one.
+    String name = 'the file';
+    try {
+      final Attachment? row = await _transfers.attachmentById(attachmentId);
+      if (row == null || !row.isGalleryImage) {
+        return;
+      }
+      name = row.fileName;
+      // Non-null for everything that got past the check above:
+      // `galleryExtensions` is derived from [Attachment.galleryMimes]'s keys, so
+      // a format that passes one is a format the other has a type for.
+      final String? mime = row.galleryMime;
+      final bool published = await publish(path: path, name: name, mime: mime);
+      if (published) {
+        _log('${entry.transfer.id}: $name is in the gallery');
+      }
+    } on Object catch (error) {
+      _log('${entry.transfer.id}: could not add $name to the gallery: $error');
+    }
   }
 
   /// Ends one file of a folder that has landed, and then the task if it was the

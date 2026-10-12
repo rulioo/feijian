@@ -7,10 +7,16 @@ import 'package:path_provider/path_provider.dart';
 /// This is the one place that knows about platform storage differences, so the
 /// transfer code in `core/` never has to.
 ///
-/// TODO(M3): on Android this should route images/videos through MediaStore
-/// into the system gallery (`Pictures/Feijian`) and everything else into the
-/// public Downloads collection. The current fallback — app-private documents —
-/// is correct but invisible to the user's file manager.
+/// Every file still lands here, including pictures. Pictures are *additionally*
+/// published to the system gallery under `Pictures/Feijian` by
+/// [GallerySaver] — as a copy, not a move, because `attachment.localPath` has
+/// to stay a real filesystem path. See that class for why.
+///
+/// TODO(M4): everything that is not a picture is still invisible to a file
+/// manager. Android's Downloads collection (`MediaStore.Downloads`) is where a
+/// received document belongs, and it needs no permission from API 29 either —
+/// but it is a different collection with different rules, and a picture has to
+/// stay out of it or every received photo lands in Downloads as well.
 abstract final class DownloadPath {
   static const String folderName = 'Feijian';
 

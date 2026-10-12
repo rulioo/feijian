@@ -1378,6 +1378,184 @@ void main() {
           reason: 'a declined folder leaves the sender a failed message');
     });
   });
+
+  // A picture that has landed is in the app's private directory, which is
+  // nowhere the user can reach it from. What this layer owns is the moment it
+  // lands — it is the only thing that knows — so what is checked here is that
+  // the moment is noticed with the right name and type, that it is noticed for
+  // exactly the files that belong in a gallery, and that a gallery which says no
+  // cannot damage a transfer that has already succeeded.
+  //
+  // Publishing is deliberately not awaited by the service, so a test cannot wait
+  // on the call directly. Each of these waits on an observable that can only
+  // happen *after* it — and the cases expecting no call prove it by running a
+  // picture in the same test and waiting for that one to arrive.
+  group('a received picture goes to the gallery (§7.1)', () {
+    test('a photograph is published under its own name and type', () async {
+      final _Gallery gallery = _Gallery();
+      final _Device receiver =
+          await _Device.start(id: 'device-eee', gallery: gallery);
+      addTearDown(receiver.dispose);
+      await a.connectTo(receiver);
+
+      final Uint8List content = bytesOf(24 * 1024, seed: 41);
+      final File source = await a.fileOf('holiday.jpg', content);
+      final Transfer sent = await a.service.sendFile(
+        peerId: receiver.id,
+        file: source,
+        mime: 'image/jpeg',
+      );
+      await receiver.service.accept((await receiver.nextOffer()).id);
+      await receiver.reachState(sent.id, TransferState.done,
+          describe: 'the picture to land');
+
+      await waitUntil(() => gallery.calls.isNotEmpty,
+          describe: 'the gallery to be offered the picture');
+      final _Published published = gallery.calls.single;
+      expect(published.name, 'holiday.jpg');
+      expect(published.mime, 'image/jpeg');
+      // The path it was handed is the file that actually landed, so a copy taken
+      // from it is the bytes that were sent — not a `.part`, and not a name
+      // invented on the way.
+      expect(published.path, endsWith('holiday.jpg'));
+      expect(await File(published.path).readAsBytes(), content);
+    });
+
+    test('a photograph this app cannot draw is published too', () async {
+      // The rule that has to differ from the one the chat uses to choose a
+      // bubble: the chat cannot show a HEIC and says so with a file card, and
+      // the phone's gallery displays it perfectly. A `.heic` left out here is
+      // the picture an iPhone user most likely just sent.
+      final _Gallery gallery = _Gallery();
+      final _Device receiver =
+          await _Device.start(id: 'device-fff', gallery: gallery);
+      addTearDown(receiver.dispose);
+      await a.connectTo(receiver);
+
+      final File source =
+          await a.fileOf('IMG_0421.HEIC', bytesOf(8 * 1024, seed: 42));
+      final Transfer sent = await a.service.sendFile(
+        peerId: receiver.id,
+        file: source,
+        mime: 'image/heic',
+      );
+      await receiver.service.accept((await receiver.nextOffer()).id);
+      await receiver.reachState(sent.id, TransferState.done,
+          describe: 'the photograph to land');
+
+      await waitUntil(() => gallery.calls.isNotEmpty,
+          describe: 'the gallery to be offered the photograph');
+      expect(gallery.calls.single.name, 'IMG_0421.HEIC');
+      expect(gallery.calls.single.mime, 'image/heic');
+    });
+
+    test('a document is not, and the picture after it still is', () async {
+      final _Gallery gallery = _Gallery();
+      final _Device receiver =
+          await _Device.start(id: 'device-ggg', gallery: gallery);
+      addTearDown(receiver.dispose);
+      await a.connectTo(receiver);
+
+      final Transfer notes = await a.service.sendFile(
+        peerId: receiver.id,
+        file: await a.fileOf('notes.txt', bytesOf(400, seed: 43)),
+      );
+      await receiver.service.accept((await receiver.nextOffer()).id);
+      await receiver.reachState(notes.id, TransferState.done,
+          describe: 'the document to land');
+
+      // The second transfer is the barrier. The document's publish, if it were
+      // going to happen, is scheduled before this one is even offered, so a
+      // single call recorded by the time this arrives can only be the picture's.
+      final Transfer photo = await a.service.sendFile(
+        peerId: receiver.id,
+        file: await a.fileOf('holiday.jpg', bytesOf(1024, seed: 44)),
+        mime: 'image/jpeg',
+      );
+      await receiver.service.accept((await receiver.nextOffer(index: 1)).id);
+      await receiver.reachState(photo.id, TransferState.done,
+          describe: 'the picture to land');
+
+      await waitUntil(() => gallery.calls.isNotEmpty,
+          describe: 'the gallery to be offered the picture');
+      expect(gallery.calls, hasLength(1),
+          reason: 'the document was not published');
+      expect(gallery.calls.single.name, 'holiday.jpg');
+    });
+
+    test('a folder is left alone, whatever is inside it', () async {
+      // A folder of photographs published file by file would flatten the tree
+      // into one album and pour hundreds of entries into it. The folder keeps
+      // its own arrangement under the download directory, which is where the
+      // whole shape of it is visible.
+      final _Gallery gallery = _Gallery();
+      final _Device receiver =
+          await _Device.start(id: 'device-hhh', gallery: gallery);
+      addTearDown(receiver.dispose);
+      await a.connectTo(receiver);
+
+      final Directory folder = await a.folderOf('holiday', <String, List<int>>{
+        'beach.jpg': bytesOf(6 * 1024, seed: 45),
+        'sunset.png': bytesOf(6 * 1024, seed: 46),
+      });
+      final Transfer folderSent =
+          await a.service.sendFolder(peerId: receiver.id, directory: folder);
+      await receiver.service.accept((await receiver.nextOffer()).id);
+      await receiver.reachState(folderSent.id, TransferState.done,
+          describe: 'the folder to arrive');
+
+      final Transfer photo = await a.service.sendFile(
+        peerId: receiver.id,
+        file: await a.fileOf('holiday.jpg', bytesOf(1024, seed: 47)),
+        mime: 'image/jpeg',
+      );
+      await receiver.service.accept((await receiver.nextOffer(index: 1)).id);
+      await receiver.reachState(photo.id, TransferState.done,
+          describe: 'the picture to land');
+
+      await waitUntil(() => gallery.calls.isNotEmpty,
+          describe: 'the gallery to be offered the picture');
+      expect(gallery.calls, hasLength(1),
+          reason: 'neither picture inside the folder was published');
+      expect(gallery.calls.single.name, 'holiday.jpg');
+      expect(await treeIn(Directory('${receiver.inbox.path}'
+              '${Platform.pathSeparator}holiday')),
+          <String, bool>{'beach.jpg': false, 'sunset.png': false});
+    });
+
+    test('a gallery that fails does not make the transfer a failure', () async {
+      // The bytes are on disk and the message says so. Reporting that transfer
+      // as failed because a second copy of it could not be written would be a
+      // lie about the user's file.
+      final _Gallery gallery = _Gallery()
+        ..throws = StateError('the gallery is not writable');
+      final _Device receiver =
+          await _Device.start(id: 'device-iii', gallery: gallery);
+      addTearDown(receiver.dispose);
+      await a.connectTo(receiver);
+
+      final Uint8List content = bytesOf(4096, seed: 48);
+      final File source = await a.fileOf('holiday.jpg', content);
+      final Transfer sent = await a.service.sendFile(
+        peerId: receiver.id,
+        file: source,
+        mime: 'image/jpeg',
+      );
+      await receiver.service.accept((await receiver.nextOffer()).id);
+      await receiver.reachState(sent.id, TransferState.done,
+          describe: 'the picture to land');
+
+      await waitUntil(() => gallery.calls.isNotEmpty,
+          describe: 'the gallery to have been asked');
+      // It was asked and it refused, and none of that reached the row the user
+      // is looking at.
+      final Attachment? landed = await receiver.transfers.attachmentFor(sent.id);
+      expect(landed!.state, TransferState.done);
+      expect(await File(landed.localPath!).readAsBytes(), content);
+      await receiver.reachState(sent.id, TransferState.done);
+      expect(receiver.service.active, isEmpty);
+    });
+  });
 }
 
 /// The paths in [directory], sorted — a `.part` left behind is the difference
@@ -1430,6 +1608,44 @@ Uint8List bytesOf(int length, {int seed = 7}) {
   return bytes;
 }
 
+/// Stands in for the platform's gallery: records what it was asked to publish,
+/// and can be made to refuse.
+///
+/// A recording callback rather than a mock of the method channel, for the same
+/// reason the rest of this file uses real sockets — what is worth checking is
+/// that the transfer layer notices the moment and passes the right three things
+/// on, and none of that is a property of the channel underneath.
+class _Gallery {
+  final List<_Published> calls = <_Published>[];
+
+  /// What [publish] answers, and what it throws instead of answering.
+  bool answer = true;
+  Object? throws;
+
+  Future<bool> publish({
+    required String path,
+    required String name,
+    required String? mime,
+  }) async {
+    calls.add(_Published(path, name, mime));
+    final Object? failure = throws;
+    if (failure != null) {
+      throw failure;
+    }
+    return answer;
+  }
+}
+
+/// One call to [_Gallery.publish], kept whole so a test can name which part of
+/// it is wrong.
+class _Published {
+  _Published(this.path, this.name, this.mime);
+
+  final String path;
+  final String name;
+  final String? mime;
+}
+
 /// One device: its database, its pool, its transfer layer, and a folder to
 /// receive into.
 ///
@@ -1471,6 +1687,7 @@ class _Device {
   static Future<_Device> start({
     required String id,
     TransferTuning tuning = const TransferTuning(),
+    _Gallery? gallery,
   }) async {
     final AppDatabase db = AppDatabase.memory();
     final int port = await freePort();
@@ -1499,6 +1716,10 @@ class _Device {
       transfers: transfers,
       downloadDirectory: () async => inbox,
       tuning: tuning,
+      // Null on every device that is not testing this, which is the same thing
+      // as off — and closer to the platforms where there is no gallery to put a
+      // file in than a stub that always says yes would be.
+      publishImage: gallery?.publish,
     );
 
     final _Device device = _Device._(

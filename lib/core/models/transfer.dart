@@ -92,27 +92,64 @@ class Attachment {
   /// Asked by the chat to decide between a thumbnail and a file card, so the
   /// answer has to be about what a thumbnail *is*, not about what the file
   /// claims to be. Hence the [extensions] list rather than "anything under
-  /// `image/`": Flutter's decoders cover those seven formats and no others, and
+  /// `image/`": Flutter's decoders cover those six formats and no others, and
   /// a `.heic` straight off an iPhone or an `.svg` claiming `image/svg+xml`
   /// would answer yes and then render as a broken-image box — a card that at
   /// least names the file and offers to open it is the better answer for both.
   ///
-  /// The mime type is still consulted first, for the sender whose file has no
-  /// extension at all. The two disagree often enough to be worth checking both:
-  /// a `.jpg` offered as `application/octet-stream` is common, and so is a
-  /// `.txt` renamed to `photo.jpg`.
-  bool get isImage {
-    final String? type = mime?.toLowerCase();
-    if (type != null && type.startsWith('image/')) {
-      // The subtype, with any parameter cut off — `image/svg+xml` is an SVG by
-      // the half before the `+`, and it is not in the set either way.
-      final String subtype = type.substring('image/'.length).split('+').first;
-      if (extensions.contains(subtype)) {
-        return true;
-      }
+  /// The mime type is consulted first and the extension second, which is the
+  /// shared rule in [_matches].
+  bool get isImage => _matches(extensions);
+
+  /// Whether the system gallery should index this file.
+  ///
+  /// Deliberately *not* [isImage], and the difference is a real one: a `.heic`
+  /// straight off an iPhone is false there and true here. The two questions only
+  /// look alike. [isImage] asks "can this app draw it", and answers no for the
+  /// formats Flutter cannot decode, because a broken-image box is worse than an
+  /// honest file card. This asks "would the user expect to find it in their
+  /// photos", and the phone's own gallery decodes HEIC perfectly well — so
+  /// refusing to publish it would lose the pictures most likely to be sent,
+  /// which are the ones the camera just took.
+  ///
+  /// The dividing line is instead: is this a *photograph someone took*. That
+  /// keeps `svg` out (a drawing, and a vector one — see [galleryMimes]) and
+  /// keeps `tiff` out with it, while letting in every format a phone camera
+  /// writes.
+  bool get isGalleryImage => _matches(galleryExtensions);
+
+  /// The concrete mime type to hand MediaStore, or null when this file should
+  /// not be published to the gallery at all.
+  ///
+  /// Concrete rather than `image/*` because MediaStore files the row by its
+  /// `MIME_TYPE` column — that is what makes the gallery read the row as a
+  /// picture rather than as a download — and the sender is not obliged to have
+  /// told us one. Which it usually has not: `application/octet-stream` for a
+  /// `.jpg` is the common case, so the extension is the fallback that does most
+  /// of the work.
+  String? get galleryMime {
+    final String? subtype = _subtypeOf(mime);
+    if (subtype != null && galleryMimes.containsKey(subtype)) {
+      return 'image/$subtype';
     }
     final String? own = _extensionOf(fileName);
-    return own != null && extensions.contains(own);
+    return own == null ? null : galleryMimes[own];
+  }
+
+  /// The one rule behind [isImage] and [isGalleryImage]: the declared type if it
+  /// names a format in [formats], otherwise the extension.
+  ///
+  /// Both halves are consulted because the two disagree often enough to matter —
+  /// a `.jpg` offered as `application/octet-stream` is common, and so is a `.txt`
+  /// renamed to `photo.jpg`. The declared type is checked first so a sender who
+  /// knows better than the file name is believed.
+  bool _matches(Set<String> formats) {
+    final String? subtype = _subtypeOf(mime);
+    if (subtype != null && formats.contains(subtype)) {
+      return true;
+    }
+    final String? own = _extensionOf(fileName);
+    return own != null && formats.contains(own);
   }
 
   /// The formats Flutter can decode on every platform it builds for.
@@ -129,6 +166,53 @@ class Attachment {
     'webp',
     'bmp',
   };
+
+  /// The formats worth publishing to the gallery, mapped to the mime type
+  /// MediaStore needs written alongside each.
+  ///
+  /// A superset of [extensions]: everything this app can draw is a picture the
+  /// user would expect in their photos, plus the three camera formats it cannot
+  /// draw. `heic`/`heif` are what an iPhone sends, `avif` is where Android
+  /// cameras and browsers are heading, and all three display fine in the gallery
+  /// even though they show as a file card inside this app.
+  ///
+  /// `tiff` and `svg` are out. Both are pictures; neither is a photograph, and a
+  /// gallery album full of scanned documents and icons is the complaint that
+  /// gets a feature like this turned off.
+  static const Map<String, String> galleryMimes = <String, String>{
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'bmp': 'image/bmp',
+    'heic': 'image/heic',
+    'heif': 'image/heif',
+    'avif': 'image/avif',
+  };
+
+  /// [galleryMimes]'s keys, derived rather than written out a second time so the
+  /// set of formats and their mime types cannot drift apart. [galleryMime] leans
+  /// on that: it answers from the map alone, without first asking whether the
+  /// format is in this set.
+  static final Set<String> galleryExtensions = galleryMimes.keys.toSet();
+
+  /// The format named by a declared mime type, lowercased and stripped of its
+  /// parameters — or null when the declared type is not an image at all.
+  ///
+  /// Both cuts matter. `; charset=…` is common on anything that HAS been through
+  /// a mime sniffer, and `image/svg+xml` is an SVG by the half before the `+` —
+  /// which is why this is not `substring('image/'.length)` on the whole string.
+  static String? _subtypeOf(String? raw) {
+    if (raw == null) {
+      return null;
+    }
+    final String type = raw.toLowerCase().split(';').first.trim();
+    if (!type.startsWith('image/')) {
+      return null;
+    }
+    return type.substring('image/'.length).split('+').first;
+  }
 
   /// The text after the last dot, lowercased — or null when there is nothing
   /// after it, which is why this is not `split('.').last`.
