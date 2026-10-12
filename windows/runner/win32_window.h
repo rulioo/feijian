@@ -7,6 +7,19 @@
 #include <memory>
 #include <string>
 
+// The window class this runner registers.
+//
+// In the header rather than next to `RegisterClass`, because
+// `single_instance.cpp` finds the running window by this name and the two must
+// not drift apart.
+//
+// Deliberately *not* the Flutter template's `FLUTTER_RUNNER_WIN32_WINDOW`: that
+// is the name every Flutter Windows application gets unless its author changes
+// it, so a `FindWindow` on it can return a stranger's window -- and a second
+// launch would then hand its "show yourself" to that window and exit, doing
+// nothing visible at all.
+inline constexpr const wchar_t kWindowClassName[] = L"Feijian.MainWindow";
+
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
 // rendering and input handling

@@ -51,6 +51,14 @@ class FlutterWindow : public Win32Window {
   // Called once Dart has answered, or once the wait has been abandoned.
   void CancelClose();
 
+  // Puts the window on screen, restored if it was minimized, and in front.
+  //
+  // The three calls that a "show me the window" request comes down to, shared
+  // by Dart's `show` and by a second launch activating this window -- see
+  // `single_instance.h`. Not a tray operation, so it does not live with the
+  // tray handling below.
+  void ShowAndFocus();
+
   void SendTrayEvent(const char* method,
                      const flutter::EncodableValue* arguments = nullptr);
   void SendTrayCommand(TrayWindow::Command command,

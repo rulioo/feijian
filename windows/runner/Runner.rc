@@ -89,11 +89,23 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
+            // `CompanyName` and `ProductName` are not the company and the
+            // product as a person would say them: `path_provider` joins the two
+            // into the application data directory, `%APPDATA%\com.feijian\
+            // Feijian\`, which holds the database, the settings, and the device
+            // id peers know this machine by. Changing either would move that
+            // directory and make this look like a brand new device to everyone
+            // on the network. They stay as they are; the copyright line below
+            // is where the real company name belongs.
             VALUE "CompanyName", "com.feijian" "\0"
             VALUE "FileDescription", "Feijian" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "feijian" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.feijian. All rights reserved." "\0"
+            // Kept to ASCII: this block declares codepage 1252 (see the
+            // `Translation` value at the end), so the copyright sign is spelled
+            // "(C)" here rather than risk a mangled byte in the file
+            // properties dialog.
+            VALUE "LegalCopyright", "Copyright (C) 2026 Beijing Sailanbo Technology Development Co., Ltd. All rights reserved." "\0"
             VALUE "OriginalFilename", "feijian.exe" "\0"
             VALUE "ProductName", "Feijian" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

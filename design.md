@@ -1118,16 +1118,29 @@ Android 8+ 起，App 退到后台数分钟后会被 Doze 冻结，Socket 被挂�
 
 ### 7.2 Windows
 
-**打包与安装**：
-- `flutter build windows --release` → 产物用 **Inno Setup** 制作安装包
-- 安装脚本添加防火墙规则（需管理员提权，仅首次安装时）：
+**打包与安装**：`tool/release_windows.sh` 一条命令产出**两个**交付物，同一个 staging 目录、同一次版本自增：
+
+- `dist/feijian-<版本>-windows-x64.zip` —— 解包即用，给不便安装的机器（借用机、受限权限的电脑）
+- `dist/feijian-<版本>-windows-x64-setup.exe` —— Inno Setup 安装包（`installer/feijian.iss`），装到 `Program Files`，带开始菜单项、卸载项和防火墙规则
+
+**zip 也保留了**，而且必须保留：它把一个 Flutter Windows 程序的真实形状摊开给人看——`feijian.exe` 旁边必须有 `data/`（`app.so` 是整个 Dart 程序、`icudtl.dat`、全部资源），以及三个 app-local 的 MSVC 运行库 DLL。**从构建目录里只手挑 exe 和 DLL 是启动不了的**，缺的正是这两样，而症状是"VCRUNTIME140.dll 未找到"。
+
+安装脚本要点：
+
+- 防火墙规则（`[Code]` 段，需管理员提权）：
   ```
   netsh advfirewall firewall add rule name="Feijian" dir=in action=allow ^
     protocol=UDP localport=24250 profile=private,domain
   netsh advfirewall firewall add rule name="Feijian" dir=in action=allow ^
     protocol=TCP localport=24250 profile=private,domain
   ```
-- **只对 `private,domain` 配置文件放行**，不对 `public` 放行 —— 避免在咖啡厅/机场等公共网络暴露服务
+- **只对 `private,domain` 配置文件放行**，不对 `public` 放行 —— 避免在咖啡厅/机场等公共网络暴露服务。这条是手写规则而非听凭 Windows 首次运行时弹的"允许访问"对话框的全部理由：那个对话框放行的是**所有**配置文件（含 public）而且是**任意**端口。
+- **先 delete 再 add**，因为 `netsh ... add rule` 是**追加**而非替换同名规则，装第二次就会叠一条，之后越叠越多。`[UninstallRun]` 里同样 delete。
+- 规则写在 `[Code]` 而不是 `[Run]`：`netsh delete` 在"本来就没有这条规则"（=每次全新安装）时退出码是 1，而 `[Run]` 段**没有**能声明"非零退出码不算失败"的 flag（`ignoreerrors` 是 `[Files]` 的 flag，`[Run]` 不认）。添加失败时安装继续并在日志里留痕。
+- **`AppMutex=Feijian.SingleInstance`**，与 `windows/runner/single_instance.h` 里的 `kMutexName` 是同一个名字。这一条解决的是升级路径上最难解释的一种失败：Inno 关闭正在运行的程序靠发 `WM_CLOSE`，而托盘功能让 `WM_CLOSE` 变成"隐藏"，于是旧实例关不掉。有 `AppMutex` 至少会明确告诉用户"先退出飞件"，而不是留一个半途而废的安装。
+- **`[Run]` 的启动条目必须带 `runasoriginaluser`**：安装器是提权的，不写这个则安装完自动启动的那一次飞件是提权进程，而 UIPI 会挡住非提权 Explorer 向其拖放——直接废掉拖拽发送，且症状与安装器毫无关联。
+
+**数据目录不随安装位置变**：`path_provider_windows` 用 exe 版本资源里的 `CompanyName`\`ProductName` 拼出 `%APPDATA%\com.feijian\Feijian\`（聊天记录、设置、以及对端认识本机的 `device_id`）。装到 `Program Files` 不改这两个字段，所以数据仍在原处；**改 `Runner.rc` 里这两个字段会让这个目录搬家**，本机会被对端当成一台新设备。版权信息只写在 `LegalCopyright`，那行不参与拼路径。安装器也**不删**用户数据。
 
 **多虚拟网卡（Windows 上最高频的坑）**：
 开发机/办公机常装有 Hyper-V、WSL2、VMware、VirtualBox、Docker，会产生大量虚拟网卡。若不过滤，广播会发到虚拟网络，导致"明明在同一 Wi-Fi 却互相看不见"。必须按 §4.1 的规则过滤，并在设置页暴露网卡多选列表供用户手动纠正。
@@ -1146,6 +1159,29 @@ Android 8+ 起，App 退到后台数分钟后会被 Doze 冻结，Socket 被挂�
 - **关机**：吞掉 `WM_QUERYENDSESSION` 或返回 FALSE 会让 Windows 弹"此应用正在阻止关机"；在 `WM_ENDSESSION` 时缩到托盘则会被等满 5s 再强杀。所以 `WM_QUERYENDSESSION` 返回 TRUE 并置 `session_ending_`，使 session 结束期间的 `WM_CLOSE` 走退出而不是隐藏。
 - **退出前显式发 `bye`**。`PostQuitMessage` 从 C++ 结束消息循环，Dart 拿不到任何后续执行机会，所以 `ref.onDispose` 和 `DiscoveryService.stop()` 里的 `bye` **都不会触发**——不显式发，对端要等满 `kPeerRemoveAfter`（60s）才把本机摘掉。收尾有界（`kShutdownGracePeriod`，500ms）且吞异常：退出路径唯一不能做的事就是拒绝结束。
 - **隐藏时收到需确认的 offer**：`confirmBeforeReceiving` 打开且窗口隐藏时，先把窗口恢复再弹对话框，否则发送方会为一个从没被问出口的问题等到 `kOfferTimeout`。
+
+**单实例**（`windows/runner/single_instance.cpp/.h`）：第二次启动**不建窗口、不绑端口、不建托盘图标**，而是把已经开着的那个窗口叫到前面来，然后自己退出。
+
+```
+第二次启动 wWinMain:
+  CreateMutexW("Feijian.SingleInstance")
+  ├─ 拿到 → 正常启动，句柄持有到进程结束（句柄没了 mutex 就没了，下一次启动就会开出第二个实例）
+  └─ ERROR_ALREADY_EXISTS →
+       FindWindowW("Feijian.MainWindow") → 有界重试（~2s，50ms 一步）
+       → GetWindowThreadProcessId → AllowSetForegroundWindow(pid)
+       → PostMessageW(hwnd, kActivateMessage) → 直接返回
+```
+
+两处非显然的地方：
+
+- **窗口类名必须改成产品专属的**（`kWindowClassName`，`win32_window.h`，`L"Feijian.MainWindow"`）。Flutter 模板给的是 `FLUTTER_RUNNER_WIN32_WINDOW`，而**每一个没改过名的 Flutter Windows 程序都用这个类名**：`FindWindowW` 撞上别人的窗口时，第二次启动会把自己的"显示"请求交给一个陌生窗口然后安静退出——比没有这个功能更糟。常量提到头文件是因为 `single_instance.cpp` 和 `win32_window.cpp` 两个编译单元都要用它。
+- **激活消息不自己显示窗口，而是走已有的 `open` 事件**（`SendTrayEvent("open")`，和托盘菜单的 Open 同一条路），因为 `TrayController` 自己记着 `_hidden`，C++ 绕过去显示会让 Dart 一直以为窗口还藏在托盘里。**但同时 C++ 也直接显示一次**：这条消息可能早于引擎就绪到达（窗口存在远早于 Dart 注册好 channel handler，而发给还没人监听的处理器的消息是**静默丢弃**的），那时 Dart 那边根本没隐藏过，直接显示既安全又是唯一可行的选择。两条路都走不冲突——`reveal()` 本身就是无条件显示。
+
+**已知边界**（记录，不修）：
+
+- **UIPI**：若第一个实例是提权运行的、第二个不是，`PostMessage` 会被静默挡掉，表现为"双击图标没反应"。同权限级别下不会发生。最现实的触发路径是用户右键"以管理员身份运行"安装包，使得 `runasoriginaluser` 无从归还给原用户。
+- **关机竞态**：第一个实例正在退出时，`FindWindow` 可能找到一个即将销毁的窗口，消息发出但没人处理，用户看到的是没反应。窗口以毫秒计，接受。
+- **第二次启动时第一个实例正在启动中**：`FindWindowW` 的有界重试覆盖了这段（窗口比 mutex 晚得多才出现），2 秒等不到就安静退出。
 
 **开机自启**：写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（设置页开关，无需管理员权限）。
 
@@ -1309,10 +1345,15 @@ feijian/
 │   │   └── settings_provider.dart
 │   │
 │   ├── platform/                     # 平台特定适配（隔离所有 Platform.isXxx）
-│   │   ├── platform_service.dart     # 抽象接口
-│   │   ├── windows_platform.dart     # 托盘、防火墙、自启、拖拽
-│   │   ├── android_platform.dart     # 组播锁、前台服务、MediaStore
-│   │   └── download_path.dart
+│   │   ├── app_paths.dart
+│   │   ├── device_identity.dart
+│   │   ├── download_path.dart
+│   │   ├── file_chooser.dart
+│   │   ├── gallery_saver.dart        # Android MediaStore
+│   │   ├── notification_sound.dart
+│   │   ├── tray_host.dart            # TrayHost 接口 + WindowsTrayHost（通道）
+│   │   ├── tray_controller.dart      # 托盘的纯策略，不碰插件（可宿主机单测）
+│   │   └── wifi_lock.dart            # Android 组播锁
 │   │
 │   └── ui/
 │       ├── pages/
@@ -1339,7 +1380,8 @@ feijian/
 │   └── app_en.arb                    # ★ 唯一交付的语言文件
 │
 ├── android/                          # 权限、前台服务配置
-├── windows/                          # 窗口、托盘配置
+├── windows/runner/                   # main.cpp、flutter_window.cpp、tray_window.cpp
+│                                     # （托盘：图标/菜单/气泡，见 §7）
 ├── test/
 │   ├── protocol/frame_codec_test.dart
 │   ├── protocol/payloads_test.dart
@@ -1362,7 +1404,7 @@ feijian/
 | **M2** 控制连接 + 文字消息 | 单端口监听、hello 握手、连接去重、心跳重连、消息帧收发、SQLite 落库、对话页、送达回执、**手动添加 IP（§4.1.4，提前自 M5 实现）** | 双向收发中英文/emoji 消息；重启后历史仍在；断网重连后消息不丢不重；AP 隔离下可用 IP 直连并收发 | 1.5d |
 | **M3** 文件传输 | offer/accept/data/done、进度条、取消、`.part` 临时文件、重名处理、图片缩略图与全屏查看、拖拽发送、剪贴板粘贴 | 传输 1GB 文件内存占用平稳；传图片可内联预览；拖拽文件夹可直接发送；取消后无残留 | 2d |
 | **M4** 文件夹 + 离线消息 | 目录清单、递归重建、发送队列、上线补发、失败重试 | 传含子目录的文件夹结构完整；对方离线时发消息，上线后自动收到 | 1.5d |
-| **M5** 打磨与打包 | 设置页全项、Windows 托盘/自启/防火墙规则、**Android 前台服务**、新消息提示音（§6.6，已实现）与 Android 通知栏、空状态排查提示、Inno Setup 安装包 | 非开发人员可在两台干净电脑/手机间直接安装使用 | 1.5d |
+| **M5** 打磨与打包 | 设置页全项、**Windows 托盘（§7，已实现）**、自启/防火墙规则、**Android 前台服务**、新消息提示音（§6.6，已实现）与 Android 通知栏、空状态排查提示、Inno Setup 安装包 | 非开发人员可在两台干净电脑/手机间直接安装使用 | 1.5d |
 | **M6** iOS（后续） | 权限声明、UI 适配、mDNS 发现 | — | 待评估 |
 
 **M0–M5 合计约 8.5 人天**，可交付可日常使用的 Windows + Android 版本。

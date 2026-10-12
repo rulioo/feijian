@@ -300,4 +300,4 @@ const Duration kShutdownGracePeriod = Duration(milliseconds: 500);
 /// Hand-maintained: keep in sync with `version:` in pubspec.yaml. Reading it at
 /// runtime would mean pulling in package_info_plus, which is not worth a
 /// dependency just for an About row.
-const String kAppVersion = '1.0.5';
+const String kAppVersion = '1.0.14';

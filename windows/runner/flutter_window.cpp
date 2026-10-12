@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "single_instance.h"
 #include "utils.h"
 
 namespace {
@@ -112,6 +113,24 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   if (std::optional<LRESULT> tray_result =
           HandleTrayMessage(hwnd, message, wparam, lparam)) {
     return *tray_result;
+  }
+
+  if (single_instance::IsActivateMessage(message)) {
+    // A second launch of the program, asking this window to come forward.
+    //
+    // Shown here rather than left to Dart alone, because this message can
+    // arrive while the engine is still starting: the window exists well before
+    // the Dart side has registered its handler for the channel, and an event
+    // sent to a handler that is not listening yet is dropped without a trace.
+    // That would be the same "clicked the icon and nothing happened" this
+    // feature exists to remove, just harder to reproduce. Showing here is safe
+    // in every case, because it is exactly what Dart's own reveal does.
+    ShowAndFocus();
+    // And told to Dart as well, because `TrayController` keeps its own idea of
+    // whether the window is hidden (`_hidden`) and would otherwise go on
+    // believing that a window which is now on screen is still in the tray.
+    SendTrayEvent("open");
+    return 0;
   }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.
@@ -227,6 +246,23 @@ void FlutterWindow::CancelClose() {
   close_pending_ = false;
 }
 
+void FlutterWindow::ShowAndFocus() {
+  HWND hwnd = GetHandle();
+  if (hwnd == nullptr) {
+    return;
+  }
+  // SW_SHOW to undo SW_HIDE, SW_RESTORE in case it was minimized before being
+  // hidden, and the foreground call so that the window lands in front rather
+  // than behind whatever else the user is reading.
+  //
+  // The foreground call is only permitted because the user just clicked
+  // something belonging to this program -- its tray icon, or a second copy of
+  // the executable, which hands its own foreground right over before asking.
+  ::ShowWindow(hwnd, SW_SHOW);
+  ::ShowWindow(hwnd, SW_RESTORE);
+  ::SetForegroundWindow(hwnd);
+}
+
 void FlutterWindow::SendTrayEvent(const char* method,
                                   const flutter::EncodableValue* arguments) {
   if (!tray_channel_) {
@@ -288,15 +324,7 @@ void FlutterWindow::HandleTrayMethodCall(
 
   if (method == "show") {
     CancelClose();
-    // The three calls a "show me the window" request comes down to. SW_SHOW to
-    // undo SW_HIDE, SW_RESTORE in case it was minimized before being hidden,
-    // and the foreground call so that it lands in front rather than behind
-    // whatever else the user is reading.
-    if (hwnd != nullptr) {
-      ::ShowWindow(hwnd, SW_SHOW);
-      ::ShowWindow(hwnd, SW_RESTORE);
-      ::SetForegroundWindow(hwnd);
-    }
+    ShowAndFocus();
     result->Success();
     return;
   }

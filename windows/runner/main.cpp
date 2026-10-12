@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "flutter_window.h"
+#include "single_instance.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
@@ -11,6 +12,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // new console when running with a debugger.
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
     CreateAndAttachConsole();
+  }
+
+  // Before COM, before the engine, and before anything binds the discovery
+  // port: a second launch is a request to see the window that is already up,
+  // not a request for a second copy of the program. See `single_instance.h`.
+  //
+  // The handle is held until this function returns, which is what keeps the
+  // mutex alive for as long as the process is: releasing it earlier would let
+  // the next launch start a second instance.
+  HANDLE instance_mutex = nullptr;
+  switch (single_instance::Claim(&instance_mutex)) {
+    case single_instance::ClaimResult::kAlreadyRunning:
+      // Nothing found means nothing to show -- the instance that holds the lock
+      // is shutting down, or is elevated and will not hear from us. Either way
+      // this process has nothing left to do.
+      single_instance::ActivateRunningInstance();
+      return EXIT_SUCCESS;
+    case single_instance::ClaimResult::kUnavailable:
+      // Whether anything else is running is unknown, so the only options are to
+      // start and risk a duplicate or to refuse to start at all. A program that
+      // will not start when asked is a worse failure than the one this guards
+      // against, so it starts -- and `instance_mutex` stays null, which the
+      // CloseHandle at the end of this function accounts for.
+      break;
+    case single_instance::ClaimResult::kFirstInstance:
+      break;
   }
 
   // Initialize COM, so that it is available for use in the library and/or
@@ -42,5 +69,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
 
   ::CoUninitialize();
+  if (instance_mutex != nullptr) {
+    ::CloseHandle(instance_mutex);
+  }
   return EXIT_SUCCESS;
 }

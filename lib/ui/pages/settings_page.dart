@@ -178,6 +178,17 @@ class SettingsPage extends ConsumerWidget {
                   applicationVersion: kAppVersion,
                 ),
               ),
+              // Not a control: nothing to tap, nothing to change. It sits with
+              // the version numbers because it belongs to the same question --
+              // which build is this, and who made it.
+              ListTile(
+                title: Text(
+                  l10n.settingsCopyright,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             ],
           ),
         ],

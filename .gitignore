@@ -44,6 +44,11 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
+# Archived releases kept by hand at the repository root — a version directory
+# holding the APK and executable that were handed out at the time. History, not
+# source, and tens of megabytes of it: the same call as /dist/ above.
+/release/
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile

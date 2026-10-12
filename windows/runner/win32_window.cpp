@@ -16,7 +16,8 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
+// `kWindowClassName` lives in `win32_window.h`: `single_instance.cpp` needs it
+// too, to find the window a second launch should activate.
 
 /// Registry key for app theme preference.
 ///
