@@ -753,6 +753,12 @@ abstract class AppLocalizations {
   /// **'Open source licenses'**
   String get settingsLicenses;
 
+  /// No description provided for @settingsCopyright.
+  ///
+  /// In en, this message translates to:
+  /// **'© 2026 Beijing Sailanbo Technology Development Co., Ltd.'**
+  String get settingsCopyright;
+
   /// No description provided for @deviceIconDesktop.
   ///
   /// In en, this message translates to:
@@ -902,6 +908,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'…and {count} more'**
   String folderMoreFiles(int count);
+
+  /// No description provided for @trayMenuOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get trayMenuOpen;
+
+  /// No description provided for @trayMenuStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Status'**
+  String get trayMenuStatus;
+
+  /// No description provided for @trayMenuQuit.
+  ///
+  /// In en, this message translates to:
+  /// **'Quit'**
+  String get trayMenuQuit;
+
+  /// First line of the tray menu's Status submenu. The zero case is the "nobody is around" row, which is why there is no separate key for it.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =0{No devices online} =1{1 device online} other{{count} devices online}}'**
+  String trayStatusOnline(int count);
+
+  /// No description provided for @trayHintTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Feijian'**
+  String get trayHintTitle;
+
+  /// No description provided for @trayHintBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Feijian is still running so it can keep receiving files. Right-click the tray icon to quit.'**
+  String get trayHintBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

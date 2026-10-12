@@ -380,6 +380,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsLicenses => 'Open source licenses';
 
   @override
+  String get settingsCopyright => '© 2026 Beijing Sailanbo Technology Development Co., Ltd.';
+
+  @override
   String get deviceIconDesktop => 'Desktop';
 
   @override
@@ -479,4 +482,31 @@ class AppLocalizationsEn extends AppLocalizations {
   String folderMoreFiles(int count) {
     return '…and $count more';
   }
+
+  @override
+  String get trayMenuOpen => 'Open';
+
+  @override
+  String get trayMenuStatus => 'Status';
+
+  @override
+  String get trayMenuQuit => 'Quit';
+
+  @override
+  String trayStatusOnline(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count devices online',
+      one: '1 device online',
+      zero: 'No devices online',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get trayHintTitle => 'Feijian';
+
+  @override
+  String get trayHintBody => 'Feijian is still running so it can keep receiving files. Right-click the tray icon to quit.';
 }

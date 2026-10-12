@@ -74,7 +74,11 @@ UI 展示名统一走常量 + i18n key `appName`，任何地方不得硬编码�
 | 拖拽（Windows） | `desktop_drop` | Flutter 桌面拖拽事实标准 |
 | 通知 | `flutter_local_notifications` | Windows + Android 统一 API |
 | Android 保活 | `flutter_foreground_task` | 后台持续收发的前提（见 §7.1） |
-| 系统托盘（Windows） | `tray_manager` + `window_manager` | 最小化到托盘继续收发 |
+| 系统托盘（Windows） | 自写原生，`windows/runner/tray_window.cpp` | 见下方说明；不用 `tray_manager` |
+
+**为什么托盘不用 `tray_manager`**（原选型是 `tray_manager` + `window_manager`，实现时推翻）：
+
+两处硬缺口，都不是配置能绕过的：`tray_manager` **没有任何气泡 API**（公开方法只有 `setIcon`/`setToolTip`/`setContextMenu`/`popUpContextMenu`/`getBounds`/`destroy`），而"第一次缩到托盘时告诉用户窗口去哪了"正需要气泡；它也**不处理 `TaskbarCreated`**，即 Explorer 重启后图标不会自己回来。用包的结果是「原生代码 + 两个包」，不是「少写原生代码」——气泡和 `TaskbarCreated` 都得自己补。而自写原生反而：气泡可做（`NIM_MODIFY` + `NIF_INFO`）、不新增任何 DLL（`shell32` 已在 MSVC 默认库集里，无需改 `CMakeLists`）、图标直接复用已编进 exe 的 `IDI_APP_ICON` 而不必新建 `assets/`、完全掌控关机消息，并绕开 `window_manager.destroy()` 在 Windows 上的已知卡死（leanflutter/window_manager#478）。代价是约 260 行 Win32。
 
 ### 2.1 为什么不用 HTTP / WebSocket
 
@@ -1128,7 +1132,20 @@ Android 8+ 起，App 退到后台数分钟后会被 Doze 冻结，Socket 被挂�
 **多虚拟网卡（Windows 上最高频的坑）**：
 开发机/办公机常装有 Hyper-V、WSL2、VMware、VirtualBox、Docker，会产生大量虚拟网卡。若不过滤，广播会发到虚拟网络，导致"明明在同一 Wi-Fi 却互相看不见"。必须按 §4.1 的规则过滤，并在设置页暴露网卡多选列表供用户手动纠正。
 
-**系统托盘**：关闭主窗口 = 最小化到托盘（可配）；托盘图标右键菜单：Open / Status / Quit。
+**系统托盘**：关闭主窗口 = 缩到托盘（`AppSettings.minimizeToTray`，默认开）；托盘图标右键菜单：Open / Status ▸ / Quit。
+
+隐藏窗口**不会**让本机从局域网消失：发现、传输、接收全部挂在 provider 生命周期（= 进程）上，不挂 widget。`discoveryServiceProvider` 是非 autoDispose 的普通 `Provider`，心跳在进程活着时一直发。全仓库唯一对生命周期有反应的是 `DiscoveryLifecycle`，它在 `hidden`/`paused` 时只置一个 `_away` 标志。
+
+实现要点（`windows/runner/tray_window.cpp` + `flutter_window.cpp`，Dart 侧 `lib/platform/tray_host.dart`、`tray_controller.dart`、`lib/ui/widgets/tray_lifecycle.dart`）：
+
+- **"隐藏还是退出"的判断在 Dart，不在 C++**。`WM_CLOSE` 不销毁窗口，而是作为 `closeRequested` 上到达 Dart，答案再下来。把判断推下去（启动时给原生一个 `setHideOnClose(bool)`）能省一次通道往返，但会让这个功能里最有后果的一条分支住在任何宿主机测试都碰不到的地方。
+- **Status 是子菜单不是动作**：第一行是禁用态表头（"No devices online" / "2 devices online"），下面每个在线设备一行，点谁就恢复窗口并选中该对话。菜单不靠定时器刷新——Dart 在 `peersProvider` 变化时去抖 250ms 推一份快照，原生在右键弹出时当场用它建菜单。
+- **托盘图标随设置走**，关掉 close-to-tray 就把图标也撤掉：通知区里有图标是"我住在这里"的声明，而关掉这个行为的用户没做过这个声明。
+- **首次缩到托盘发一次气泡**（"还在后台运行，右键托盘图标可退出"），`SettingKeys.trayHintShown` 记住发过了。best-effort：Win10/11 的专注助手会抑制气泡，所以它是礼貌，不是唯一信号。
+- **`TaskbarCreated` 必须处理**（~10 行）。Explorer 重启会让所有 `Shell_NotifyIcon` 注册一起消失，shell 广播这条注册消息通知。不处理的话：窗口是隐藏的、图标没了，用户除了任务管理器杀进程没有任何办法把飞件找回来——这是硬锁死，不是外观问题。同理，`hide` 之前先查 `has_icon()`：没有图标就宁可不隐藏（直接退出），也不留一个够不着的进程。
+- **关机**：吞掉 `WM_QUERYENDSESSION` 或返回 FALSE 会让 Windows 弹"此应用正在阻止关机"；在 `WM_ENDSESSION` 时缩到托盘则会被等满 5s 再强杀。所以 `WM_QUERYENDSESSION` 返回 TRUE 并置 `session_ending_`，使 session 结束期间的 `WM_CLOSE` 走退出而不是隐藏。
+- **退出前显式发 `bye`**。`PostQuitMessage` 从 C++ 结束消息循环，Dart 拿不到任何后续执行机会，所以 `ref.onDispose` 和 `DiscoveryService.stop()` 里的 `bye` **都不会触发**——不显式发，对端要等满 `kPeerRemoveAfter`（60s）才把本机摘掉。收尾有界（`kShutdownGracePeriod`，500ms）且吞异常：退出路径唯一不能做的事就是拒绝结束。
+- **隐藏时收到需确认的 offer**：`confirmBeforeReceiving` 打开且窗口隐藏时，先把窗口恢复再弹对话框，否则发送方会为一个从没被问出口的问题等到 `kOfferTimeout`。
 
 **开机自启**：写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（设置页开关，无需管理员权限）。
 

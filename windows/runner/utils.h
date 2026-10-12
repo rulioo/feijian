@@ -12,6 +12,12 @@ void CreateAndAttachConsole();
 // encoded in UTF-8. Returns an empty std::string on failure.
 std::string Utf8FromUtf16(const wchar_t* utf16_string);
 
+// The reverse of Utf8FromUtf16. The tray menu is the only thing that needs it:
+// its captions and its device names both come from Dart, where every string is
+// UTF-8, and a Win32 menu takes UTF-16. Returns an empty wstring on failure,
+// which renders as a blank menu row rather than as mojibake.
+std::wstring Utf16FromUtf8(const std::string& utf8_string);
+
 // Gets the command line arguments passed in as a std::vector<std::string>,
 // encoded in UTF-8. Returns an empty std::vector<std::string> on failure.
 std::vector<std::string> GetCommandLineArguments();

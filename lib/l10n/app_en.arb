@@ -214,6 +214,7 @@
   "settingsVersion": "Version",
   "settingsProtocolVersion": "Protocol version",
   "settingsLicenses": "Open source licenses",
+  "settingsCopyright": "© 2026 Beijing Sailanbo Technology Development Co., Ltd.",
   "deviceIconDesktop": "Desktop",
   "deviceIconLaptop": "Laptop",
   "deviceIconPhone": "Phone",
@@ -266,5 +267,19 @@
         "type": "int"
       }
     }
-  }
+  },
+  "trayMenuOpen": "Open",
+  "trayMenuStatus": "Status",
+  "trayMenuQuit": "Quit",
+  "trayStatusOnline": "{count, plural, =0{No devices online} =1{1 device online} other{{count} devices online}}",
+  "@trayStatusOnline": {
+    "description": "First line of the tray menu's Status submenu. The zero case is the \"nobody is around\" row, which is why there is no separate key for it.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "trayHintTitle": "Feijian",
+  "trayHintBody": "Feijian is still running so it can keep receiving files. Right-click the tray icon to quit."
 }

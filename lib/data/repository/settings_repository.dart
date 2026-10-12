@@ -107,4 +107,14 @@ abstract final class SettingKeys {
   static const String minimizeToTray = 'minimize_to_tray';
   static const String backgroundService = 'background_service';
   static const String languageCode = 'language_code';
+
+  /// Whether the "still running in the tray" balloon has been shown — design.md
+  /// §7.2.
+  ///
+  /// Deliberately absent from `AppSettings`, unlike every other key above: that
+  /// class mirrors the settings screen field for field, and this is not a
+  /// preference the user has. It records that a one-time explanation has
+  /// happened, and exposing it on the settings object would invite putting it
+  /// on the settings screen.
+  static const String trayHintShown = 'tray_hint_shown';
 }

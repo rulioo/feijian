@@ -10,6 +10,7 @@ import 'ui/ui_constants.dart';
 import 'ui/widgets/discovery_lifecycle.dart';
 import 'ui/widgets/message_chime.dart';
 import 'ui/widgets/offer_listener.dart';
+import 'ui/widgets/tray_lifecycle.dart';
 
 class FeijianApp extends ConsumerWidget {
   const FeijianApp({super.key});
@@ -20,6 +21,7 @@ class FeijianApp extends ConsumerWidget {
 
     // Wrapped around the whole app rather than the devices page: being away is
     // a property of the process, not of whichever page happens to be on top.
+    // `MessageChime` and `DiscoveryLifecycle` belong here for the same reason.
     return MessageChime(
       child: DiscoveryLifecycle(
         child: MaterialApp(
@@ -36,6 +38,14 @@ class FeijianApp extends ConsumerWidget {
               : Locale(settings.languageCode!),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
+          // `TrayLifecycle` sits here rather than around the whole app — one
+          // level further out and `AppLocalizations.of` in its menu labels
+          // would throw, because `MaterialApp` is what provides
+          // `Localizations` and a widget above it has none. Still outside the
+          // navigator, which is the part that matters: the window is revealed
+          // before a dialog can be raised on it (§7.2).
+          builder: (BuildContext context, Widget? child) =>
+              TrayLifecycle(child: child ?? const SizedBox.shrink()),
           // Inside the navigator, so an offer can put a dialog on screen from
           // wherever the user happens to be (§9.2).
           home: const OfferListener(child: HomeShell()),

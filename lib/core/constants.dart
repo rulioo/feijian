@@ -278,6 +278,21 @@ const int kMaxMessageTextLength = 64 * 1024;
 /// so there is no reason to be strict about it.
 const Duration kFrameMaxClockSkew = Duration(days: 3650);
 
+// --- Shutdown ---------------------------------------------------------------
+
+/// How long the goodbye gets on the way out — design.md §7.2.
+///
+/// Quitting ends the process from C++, which gives Dart no further turn: no
+/// `onDispose`, no service teardown, and therefore no `bye`. So the goodbye is
+/// sent explicitly first, and this is the ceiling on the whole exchange rather
+/// than its expected duration — [kCloseFlushTimeout] and the socket timeouts
+/// inside `DiscoveryService.stop()` are all shorter and all nested within it.
+///
+/// Short because it sits on the close path, where a visible pause reads as a
+/// hang. Exceeding it is survivable: the peers fall back to
+/// [kPeerRemoveAfter], which is the behaviour before this feature existed.
+const Duration kShutdownGracePeriod = Duration(milliseconds: 500);
+
 // --- Build metadata ---------------------------------------------------------
 
 /// Shown on the About screen.
