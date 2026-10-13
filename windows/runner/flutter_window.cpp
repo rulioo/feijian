@@ -31,6 +31,11 @@ constexpr UINT kCloseFailsafeMs = 1000;
 // The channel name, matching `WindowsTrayHost._channel` in Dart.
 constexpr char kTrayChannel[] = "com.feijian.lan/tray";
 
+// Posted to this window to end the program. Never sent from outside: a tray
+// method call that ends the program posts this instead of destroying the window
+// on the spot. See the `quit` branch of `HandleTrayMethodCall` for why.
+constexpr UINT kQuitMessage = WM_APP + 2;
+
 // Reads a string out of a decoded map, or returns an empty string.
 std::string StringFromMap(const flutter::EncodableMap& map, const char* key) {
   const auto it = map.find(flutter::EncodableValue(key));
@@ -100,7 +105,16 @@ void FlutterWindow::OnDestroy() {
   tray_channel_.reset();
 
   if (flutter_controller_) {
-    flutter_controller_ = nullptr;
+    // Cleared before the engine is released, not in the same step as releasing
+    // it. Assigning `nullptr` in one step leaves `flutter_controller_` set for
+    // the whole of the teardown, and the teardown destroys the view window --
+    // which sends messages to this window, into `MessageHandler`, which finds
+    // the pointer set and calls into a controller that is halfway through being
+    // destroyed. Moving it out first means every message delivered during the
+    // teardown sees null and takes the branch that does nothing.
+    std::unique_ptr<flutter::FlutterViewController> controller =
+        std::move(flutter_controller_);
+    controller.reset();
   }
 
   Win32Window::OnDestroy();
@@ -110,6 +124,17 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kQuitMessage) {
+    // The end of the program, run from the message loop rather than from
+    // inside a platform-channel call. It has to be here and not there:
+    // destroying the window destroys the engine, and the engine is what is
+    // dispatching the call that asked for this -- unwinding through a
+    // half-destroyed engine jumps through a freed vtable. See the `quit`
+    // branch of `HandleTrayMethodCall`.
+    ::DestroyWindow(hwnd);
+    return 0;
+  }
+
   if (std::optional<LRESULT> tray_result =
           HandleTrayMessage(hwnd, message, wparam, lparam)) {
     return *tray_result;
@@ -214,13 +239,26 @@ std::optional<LRESULT> FlutterWindow::HandleTrayMessage(
         session_ending_ = false;
         return 0;
       }
-      // Ending the session for real. Posting the quit directly rather than
-      // destroying the window: it skips a `WM_CLOSE` round trip to Dart, which
-      // during a shutdown is a round trip to a process that is being torn down
-      // around it. No `bye` is sent either -- on a shutdown there is usually no
+      // Ending the session for real -- and the window goes with it.
+      //
+      // Destroying the window rather than posting the quit message directly,
+      // which is what this did and what killed the process on every logoff and
+      // every restart. A bare quit ends the message loop with the window still
+      // standing, so the engine is torn down later and by the wrong owner:
+      // `wWinMain` returns, `~FlutterWindow` destroys the controller, and the
+      // controller's teardown destroys its own view window -- which sends
+      // messages to a parent window that is alive, whose handler calls into the
+      // controller being destroyed. That is an access violation inside
+      // `flutter_windows.dll`, measured at `flutter_windows.dll+0x1d9b0`.
+      // Destroying the window takes the ordinary `WM_DESTROY` path instead,
+      // where the handle is cleared first and the engine is released in order.
+      //
+      // `DestroyWindow` sends `WM_DESTROY` and never `WM_CLOSE`, so this keeps
+      // what the direct quit was chosen for: no round trip to Dart during a
+      // shutdown. No `bye` is sent either -- on a shutdown there is usually no
       // network left to send it on, which is why peers already treat a silent
       // departure as normal (see `kPeerRemoveAfter`).
-      ::PostQuitMessage(0);
+      ::DestroyWindow(hwnd);
       return 0;
 
     default:
@@ -316,7 +354,9 @@ void FlutterWindow::HandleTrayMethodCall(
     if (tray_ && tray_->has_icon() && hwnd != nullptr) {
       ::ShowWindow(hwnd, SW_HIDE);
     } else if (hwnd != nullptr) {
-      ::DestroyWindow(hwnd);
+      // A close, because there is nowhere to hide. Posted for the same reason
+      // the `quit` branch posts it.
+      ::PostMessageW(hwnd, kQuitMessage, 0, 0);
     }
     result->Success();
     return;
@@ -331,13 +371,26 @@ void FlutterWindow::HandleTrayMethodCall(
 
   if (method == "quit") {
     CancelClose();
+    // Answered before the window is destroyed, and the order is the point:
+    // destroying the window runs `OnDestroy`, which destroys the engine and
+    // with it the channel that owns `result`. Replying afterwards calls into
+    // memory the engine has already released.
+    result->Success();
     if (hwnd != nullptr) {
+      // Posted, not called: this code is running inside the engine's dispatch
+      // of a platform-channel call, and destroying the window here destroys the
+      // engine that is doing the dispatching. The dispatch then unwinds through
+      // a destroyed object and jumps through a freed vtable -- measured as a
+      // guard-page violation at a garbage address in no module at all, every
+      // time the tray menu's Quit was chosen. Posting moves the destruction to
+      // the message loop, where the dispatch is finished and the engine has no
+      // frame left on the stack.
+      //
       // WM_DESTROY posts the quit message, which ends the loop in `main.cpp`
       // and takes the process with it. This relies on `SetQuitOnClose(true)`,
       // which is why that call stays.
-      ::DestroyWindow(hwnd);
+      ::PostMessageW(hwnd, kQuitMessage, 0, 0);
     }
-    result->Success();
     return;
   }
 
