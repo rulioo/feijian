@@ -898,7 +898,16 @@ void main() {
   test('one silence gets one repair, not one a second', () async {
     await startService(silentPeerAfter: const Duration(milliseconds: 200));
     await peer.send(_announce(port: peer.port), port);
-    await _waitUntil(() => service.table.length == 1, reason: 'the peer');
+    await _waitUntil(
+      () => service.table.length == 1,
+      reason: 'the peer',
+      diagnostics: () => '  port=$port peerPort=${peer.port}\n'
+          '  table=${service.table.length} running=${service.isRunning}\n'
+          '  listeners=${listeners().length} answerers=${answerers().length}\n'
+          '  logs=${logs.join(' | ')}\n'
+          '  sends=${peer.sendLog.join(' ; ')}\n'
+          '  peer received ${peer.received.length} datagrams',
+    );
 
     final int before = listeners().length;
     await _waitUntil(
