@@ -49,6 +49,11 @@ app.*.map.json
 # source, and tens of megabytes of it: the same call as /dist/ above.
 /release/
 
+# Where a finished installer is put when it is about to be handed over. The same
+# twelve megabytes as the one in /dist/ it was copied from, so the same call
+# again: an output, not source.
+/install/
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile
