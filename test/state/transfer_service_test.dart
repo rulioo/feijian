@@ -686,7 +686,7 @@ void main() {
         'sub/two.txt': bytesOf(3072, seed: 2),
       });
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: folder);
+          (await a.service.sendFolder(peerId: b.id, directory: folder)).transfer;
       await waitUntil(
         () => a.service.active.isEmpty,
         describe: 'the folder to be owed',
@@ -1018,7 +1018,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       final Transfer offered = await b.nextOffer();
       expect(offered.id, sent.id);
       expect(offered.state, TransferState.offered);
@@ -1095,7 +1095,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       await b.service.accept((await b.nextOffer()).id);
       await b.reachState(sent.id, TransferState.done,
           describe: 'both files to arrive');
@@ -1120,7 +1120,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       await b.service.accept((await b.nextOffer()).id);
       await b.reachState(sent.id, TransferState.done,
           describe: 'the empty file and the other one to arrive');
@@ -1144,7 +1144,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       await b.service.accept((await b.nextOffer()).id);
       await b.reachState(sent.id, TransferState.done,
           describe: 'a folder with nothing in it to finish');
@@ -1172,7 +1172,7 @@ void main() {
         'zzz.bin': bytesOf(4096, seed: 42),
       });
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       final Transfer offered = await b.nextOffer();
 
       // The walk has happened and the manifest is on the wire; the file behind
@@ -1227,7 +1227,7 @@ void main() {
           'note.txt': rounds[round],
         });
         final Transfer sent =
-            await a.service.sendFolder(peerId: b.id, directory: source);
+            (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
         await b.service.accept((await b.nextOffer(index: round)).id);
         await b.reachState(sent.id, TransferState.done,
             describe: 'folder ${round + 1} to arrive');
@@ -1262,7 +1262,7 @@ void main() {
       await File(b.inbox.path).writeAsBytes(<int>[0], flush: true);
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       await b.service.accept((await b.nextOffer()).id);
 
       await b.reachState(sent.id, TransferState.failed,
@@ -1274,6 +1274,51 @@ void main() {
           reason: 'nothing was written anywhere near it');
       expect(b.service.active, isEmpty);
       expect(a.service.active, isEmpty);
+    });
+
+    test('a link in the folder is left out, and the offer says so', () async {
+      // The manifest is the only record of what was in the folder, and it holds
+      // what the walk could describe rather than what was there: a link is
+      // neither a file nor a directory, so it never reaches the other end and
+      // nothing there can miss it. The count coming back is therefore the only
+      // way the sender can ever learn their folder went out one item short —
+      // which is why it is asserted here rather than left to the card.
+      await a.connectTo(b);
+      final Directory source = await a.folderOf('holiday', <String, List<int>>{
+        'beach.jpg': bytesOf(64, seed: 21),
+      });
+      final Link shortcut =
+          Link('${source.path}${Platform.pathSeparator}shortcut');
+      try {
+        shortcut.createSync('${source.path}${Platform.pathSeparator}beach.jpg');
+      } on FileSystemException {
+        // Creating a link needs a privilege Windows does not always grant.
+        return;
+      }
+
+      final FolderOffer offer =
+          await a.service.sendFolder(peerId: b.id, directory: source);
+
+      expect(offer.skipped, 1);
+      // One item short is not a refusal: the rest of the folder is sent, and
+      // the offer is an ordinary one.
+      final Transfer offered = await b.nextOffer();
+      expect(offered.id, offer.transfer.id);
+      expect(offered.bytesTotal, 64);
+
+      await b.service.accept(offered.id);
+      await b.reachState(offered.id, TransferState.done,
+          describe: 'the file to arrive');
+
+      final Directory landed = Directory(
+        '${b.inbox.path}${Platform.pathSeparator}holiday',
+      );
+      expect(
+        await treeIn(landed),
+        <String, bool>{'beach.jpg': false},
+        reason: 'the link was not sent as an empty file under its own name '
+            'either — nothing of it is there',
+      );
     });
   });
 
@@ -1294,7 +1339,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       final Transfer offered = await b.nextOffer();
 
       // The moment the first file is installed and no byte of the second has
@@ -1358,7 +1403,7 @@ void main() {
       });
 
       final Transfer sent =
-          await a.service.sendFolder(peerId: b.id, directory: source);
+          (await a.service.sendFolder(peerId: b.id, directory: source)).transfer;
       await b.service.decline((await b.nextOffer()).id);
 
       await b.reachState(sent.id, TransferState.declined,
@@ -1499,7 +1544,8 @@ void main() {
         'sunset.png': bytesOf(6 * 1024, seed: 46),
       });
       final Transfer folderSent =
-          await a.service.sendFolder(peerId: receiver.id, directory: folder);
+          (await a.service.sendFolder(peerId: receiver.id, directory: folder))
+              .transfer;
       await receiver.service.accept((await receiver.nextOffer()).id);
       await receiver.reachState(folderSent.id, TransferState.done,
           describe: 'the folder to arrive');

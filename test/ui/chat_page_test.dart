@@ -1010,6 +1010,39 @@ void main() {
     expect(find.byType(FolderCard), findsNothing);
   });
 
+  testWidgets('a folder offered one item short says so', (
+    WidgetTester tester,
+  ) async {
+    // The other side of the refusal above: a folder holding something the walk
+    // cannot describe is *sent*, minus that thing, and the sender is the only
+    // one who can be told — nothing that reaches the peer records it, so a
+    // sentence here is the whole of the explanation anyone gets.
+    makeFile('inside.txt');
+    final Link shortcut =
+        Link('${scratch.path}${Platform.pathSeparator}shortcut');
+    try {
+      shortcut.createSync('${scratch.path}${Platform.pathSeparator}inside.txt');
+    } on FileSystemException {
+      // Creating a link needs a privilege Windows does not always grant.
+      return;
+    }
+    chooser.pickedFolder = scratch.path;
+    await pumpChat(tester);
+
+    await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
+    await settleFileWork(tester, rounds: 10);
+
+    expect(
+      find.byType(FolderCard),
+      findsOneWidget,
+      reason: 'one item left out is not a refusal — the rest of the folder goes',
+    );
+    expect(
+      find.textContaining('1 item in this folder was skipped'),
+      findsOneWidget,
+    );
+  });
+
   /// Writes a folder the way the engine does: one message, one attachment per
   /// file, one task transfer that has no attachment of its own — §4.6's shape,
   /// and the reason a folder's card reads two sources.

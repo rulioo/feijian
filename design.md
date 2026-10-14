@@ -578,6 +578,7 @@ while (offset < size) {
 | `file_cancel` 不带 `relPath` | 整个任务作废 | 这就是"取消"在一个文件夹上的意思 |
 | 取消恰好落在"文件正在改名入位"这个窗口 | 这个文件**保留**，后面的不再取 | 见下 |
 | 同名文件夹 | **合并**，不给自己编号 | 见下 |
+| 描述不了的条目（符号链接、列目录后 stat 失败的文件） | **跳过并计数，不进 manifest**，也不因此拒绝整个文件夹 | 见下 |
 
 **一次文件夹的交错：两个连接，同一个文件。** 接收端为一个文件建 receiver 要跨好几个 await（先建目录，再开 `.part`），而 receiver 是在这之后才记到 `entry` 上的。在这段窗口里，"有没有文件在收"这个判断两个入口都会读到"没有" —— 于是同一个文件被建了两份 receiver，两份都拿着同一个 `.part`。第一份改名入位时第二份还开着，Windows 直接给 `errno = 32`。症状是**一个磁盘错误**：
 
@@ -603,11 +604,13 @@ could not finish the file: PathAccessException: Cannot rename file to
 
 **`file_cancel` 不为失败的附件写行。** 收到一个文件的 `file_cancel` 只做两件事：把这个 `relPath` 从 `expected` 里拿掉、置 `anyFailed`。附件行**故意不动** —— 任务收尾时 `TransferRepository.end` 的 `endPendingAttachments` 会一次性把所有没有结论的行写掉，而且它写得完整（`done` 永不覆盖）。这里再写一次就是同一条规则住在两个地方，外加一个中途读起来像卡住的行。
 
+**走不进 manifest 的东西必须说出来。** `FolderManifest.walk` 只描述得了**文件和目录**。符号链接不跟随（`link -> /` 等于把整个文件系统报过去，两个互指的链接会走到天荒地老），也不能当空文件发过去（那会在链接的名字下落一个类型不对的东西）；列目录之后 stat 失败的条目（刚被删掉、读不了）是同一类——**描述不了的东西发不出去**。这些一律跳过并计数（`FolderManifest.skipped`）。计数不是顺手，是必需的：manifest 记的是"描述得了的东西"而不是"文件夹里有的东西"，所以**少了这一件，接收端没有任何地方看得出来**，它收到的就是一个完整的文件夹。数字因此从 `sendFolder` 返回（`FolderOffer.skipped`），由对话页在发出的那一刻用一句话告诉发送方——这是唯一说得出口的时机，等对端回来说"少了个文件"，发送方已经无从联想到那个链接。一句话不等于拒绝：少一件的文件夹照发，剩下的都到。
+
 **同名文件夹合并，重名文件才编号。** `IncomingFile` 本来就会给撞名的文件让路（` (1)`、` (2)`），这就够了：第二次收到 `photos`，要的是"两张照片都在 photos 里"，而不是磁盘上多出一个 `photos (1)` 目录去冒充用户说的那个文件夹。
 
 **一个顺带修掉的旧 bug。** `_maybeFinishIncoming` 先置 `entry.finished = true` 再调 `_failIncoming`，而后者当时的守卫里含 `finished` —— 于是安装失败（改名失败、磁盘满）**被自己静默吞掉**：行永远停在 `transferring`，还占着并发名额。守卫的职责是"别把同一件事收尾两次"，那就只该看 `cancelled`。这是实现文件夹时踩出来的，影响的是单文件路径。
 
-**这块的测试与被破坏时的表现**（每组都实际验证过删掉守卫会有测试失败）：`transfer_service_test.dart` 的文件夹两组 9 条（`a folder crossing` 7 条、`stopping a folder` 2 条，另加一个真实的目录树对比辅助 `treeIn`），加上 `folder_manifest_test.dart` / `folder_layout_test.dart` 各自那一组。逐个实跑删掉的守卫：认领等待（`entry.starting`）、空文件夹的收尾、`_maybeFinishIncoming` 的文件夹分支、`entry.stopping` 分支、`anyFailed` 的置位 —— 分别是 6 / 1 / 5 / 1 / 1 条失败。发送端"先开文件后开 socket"的顺序由"一个文件中途变大"那条测试钉住：顺序反了，接收端会把整个任务判失败，后面本来能到的文件也就到不了。
+**这块的测试与被破坏时的表现**（每组都实际验证过删掉守卫会有测试失败）：`transfer_service_test.dart` 的文件夹两组 10 条（`a folder crossing` 8 条、`stopping a folder` 2 条，另加一个真实的目录树对比辅助 `treeIn`），加上 `folder_manifest_test.dart` / `folder_layout_test.dart` 各自那一组。逐个实跑删掉的守卫：认领等待（`entry.starting`）、空文件夹的收尾、`_maybeFinishIncoming` 的文件夹分支、`entry.stopping` 分支、`anyFailed` 的置位 —— 分别是 6 / 1 / 5 / 1 / 1 条失败。发送端"先开文件后开 socket"的顺序由"一个文件中途变大"那条测试钉住：顺序反了，接收端会把整个任务判失败，后面本来能到的文件也就到不了。
 
 
 

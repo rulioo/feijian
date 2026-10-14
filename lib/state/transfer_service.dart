@@ -38,6 +38,33 @@ class TransferException implements Exception {
   String toString() => 'TransferException: $message';
 }
 
+/// What [TransferService.sendFolder] made of a folder: the task it started, and
+/// how much of the folder is not in it.
+///
+/// A folder is the only thing offered here whose contents are **read** rather
+/// than named, and the walk can describe only what it can read and what is
+/// really a file or a directory. A link, or a file that vanished between the
+/// listing and the stat, is therefore neither sent nor failed — it is simply
+/// **left out** of the offer, and the other end never hears of it. A folder that
+/// arrives one file short with no explanation is the outcome worth avoiding, so
+/// the count comes back beside the task for the caller to say out loud.
+///
+/// Beside it rather than on it: [Transfer] is persisted and is about the bytes
+/// that are moving, and this is about bytes that are not, which no retry or
+/// resume would ever need. `0` is the ordinary case — everything in the folder
+/// was describable.
+class FolderOffer {
+  const FolderOffer({required this.transfer, required this.skipped});
+
+  /// The task, which is what this call returned before there was anything else
+  /// to say about it.
+  final Transfer transfer;
+
+  /// How many things inside the folder were left out, and why — see
+  /// [FolderManifest.skipped].
+  final int skipped;
+}
+
 /// Runs file transfers between the wire and the database — design.md §4.6.
 ///
 /// This is the layer the byte classes deliberately do not know about. The pieces
@@ -295,7 +322,11 @@ class TransferService {
   /// A folder that fails part way through keeps what landed: see
   /// [TransferRepository.finishFile]. `failed` here means the task, not the
   /// files, and the ones already across are on disk and openable.
-  Future<Transfer> sendFolder({
+  ///
+  /// The other half of "better said than half-sent" is [FolderOffer.skipped]:
+  /// the manifest may hold less than the folder does, and the caller is the only
+  /// one who can tell the user so.
+  Future<FolderOffer> sendFolder({
     required String peerId,
     required Directory directory,
   }) async {
@@ -350,7 +381,7 @@ class TransferService {
     _emit(transfer);
 
     unawaited(_runSendFolder(outgoing));
-    return transfer;
+    return FolderOffer(transfer: transfer, skipped: manifest.skipped);
   }
 
   /// Sends a file again after an attempt at it ended — §6.3's retry.

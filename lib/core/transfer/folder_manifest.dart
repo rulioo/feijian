@@ -30,7 +30,7 @@ class FolderManifest {
   const FolderManifest({
     required this.name,
     required this.entries,
-    this.skippedLinks = 0,
+    this.skipped = 0,
   });
 
   /// The folder's own name — the last component of its path, which is what the
@@ -45,14 +45,25 @@ class FolderManifest {
   /// comparable between attempts.
   final List<ManifestEntry> entries;
 
-  /// Symbolic links the walk left out.
+  /// What the walk could not describe, and so left out of the folder.
   ///
-  /// Not followed: `link -> /` would offer the whole file system, and two links
-  /// pointing at each other would walk forever. Not sent as empty files either,
-  /// which would land a file of the wrong kind under the link's name. So they
-  /// are skipped — and counted, because a folder that arrives one file short
-  /// with no explanation is worse than one the sender can say so about.
-  final int skippedLinks;
+  /// Symbolic links are not followed: `link -> /` would offer the whole file
+  /// system, and two links pointing at each other would walk forever. They are
+  /// not sent as empty files either, which would land a file of the wrong kind
+  /// under the link's name. A file that vanished between the listing and the
+  /// stat is in the same position — what cannot be described cannot be sent —
+  /// and so is anything else the platform grows that is neither file nor
+  /// directory.
+  ///
+  /// Counted rather than merely dropped, because a folder that arrives an item
+  /// short with no explanation is worse than one the sender can say so about:
+  /// this manifest holds what was describable, not what was there, so nothing
+  /// downstream can notice the difference. What the caller does with the number
+  /// is the caller's business — this class has no business choosing words.
+  ///
+  /// (Named for what it counts rather than for the commonest case: a link is
+  /// one of the things in here, not all of them.)
+  final int skipped;
 
   /// How many *files* — directories are not files, and a folder of empty
   /// directories honestly has none.
@@ -110,7 +121,7 @@ class FolderManifest {
           mtime: stat.modified.millisecondsSinceEpoch,
         );
       } else {
-        // A link, and anything else the platform grows later. See [skippedLinks].
+        // A link, and anything else the platform grows later. See [skipped].
         skipped++;
         continue;
       }
@@ -128,7 +139,7 @@ class FolderManifest {
     return FolderManifest(
       name: _baseName(directory.path),
       entries: List<ManifestEntry>.unmodifiable(entries),
-      skippedLinks: skipped,
+      skipped: skipped,
     );
   }
 

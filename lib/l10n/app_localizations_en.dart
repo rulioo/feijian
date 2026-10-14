@@ -468,6 +468,17 @@ class AppLocalizationsEn extends AppLocalizations {
   String get folderUnreadable => 'That folder cannot be read on this device.';
 
   @override
+  String folderItemsSkipped(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count items in this folder were skipped',
+      one: '1 item in this folder was skipped',
+    );
+    return '$_temp0. Links and unreadable items are not sent.';
+  }
+
+  @override
   String folderSomeFilesFailed(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,

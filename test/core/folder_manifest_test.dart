@@ -191,7 +191,7 @@ void main() {
       final FolderManifest manifest = await walk();
 
       expect(byPath(manifest).keys, <String>['real.txt']);
-      expect(manifest.skippedLinks, 1);
+      expect(manifest.skipped, 1);
       expect(manifest.fileCount, 1);
     });
   });

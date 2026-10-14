@@ -252,6 +252,15 @@
   },
   "folderTooManyFiles": "This folder holds too many files to describe in one go. Send a part of it instead.",
   "folderUnreadable": "That folder cannot be read on this device.",
+  "folderItemsSkipped": "{count, plural, =1{1 item in this folder was skipped} other{{count} items in this folder were skipped}}. Links and unreadable items are not sent.",
+  "@folderItemsSkipped": {
+    "description": "Said to the sender at the moment the folder is offered. The walk can describe only files and directories, so a link or a file that vanished from under it is left out of the offer entirely — the receiver never learns of it, which is why this sentence has to appear here or nowhere.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "folderSomeFilesFailed": "{count, plural, =1{1 file in this folder did not arrive} other{{count} files in this folder did not arrive}}",
   "folderMoreFiles": "…and {count} more",
   "@folderMoreFiles": {

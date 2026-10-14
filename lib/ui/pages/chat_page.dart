@@ -177,6 +177,13 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   /// A failure is told, not thrown onward: the user asked for a folder, and the
   /// walk may take a second on a big one, so a refusal has to arrive as an answer
   /// rather than as a page that did nothing.
+  ///
+  /// A folder that was offered with something left out is told too, and this is
+  /// the only moment it can be: the manifest is the only record of what was in
+  /// the folder, and it holds what was describable rather than what was there, so
+  /// nothing downstream can notice the difference. Left unsaid, the sender finds
+  /// out when the other end says a file never arrived — and has no way to connect
+  /// that to the link they put in the folder last month.
   Future<void> _sendFolder(String path) async {
     final String? peerId = _peerId;
     if (peerId == null) {
@@ -190,7 +197,19 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     }
 
     try {
-      await transfers.sendFolder(peerId: peerId, directory: Directory(path));
+      final FolderOffer offer = await transfers.sendFolder(
+        peerId: peerId,
+        directory: Directory(path),
+      );
+      if (!mounted || offer.skipped == 0) {
+        return;
+      }
+      _tell(
+        AppLocalizations.of(context).folderItemsSkipped(offer.skipped),
+        // Longer than the usual two seconds: this one is two sentences, and it
+        // is the only place the app ever mentions the item that is missing.
+        duration: const Duration(seconds: 5),
+      );
     } on TransferException catch (error) {
       if (!mounted) {
         return;
@@ -554,14 +573,20 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     return pictures;
   }
 
-  void _tell(String message) {
+  /// Shows [message] over the page for a moment.
+  ///
+  /// Two seconds is the default because most of these are acknowledgements —
+  /// "Saved", a refusal in one line — where what matters is that the app
+  /// answered at all. A message the user has to *read*, and could act on, asks
+  /// for longer and says so at its call site rather than here.
+  void _tell(String message, {Duration duration = const Duration(seconds: 2)}) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
           content: Text(message),
           behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 2),
+          duration: duration,
         ),
       );
   }

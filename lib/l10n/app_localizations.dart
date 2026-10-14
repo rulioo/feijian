@@ -897,6 +897,12 @@ abstract class AppLocalizations {
   /// **'That folder cannot be read on this device.'**
   String get folderUnreadable;
 
+  /// Said to the sender at the moment the folder is offered. The walk can describe only files and directories, so a link or a file that vanished from under it is left out of the offer entirely — the receiver never learns of it, which is why this sentence has to appear here or nowhere.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 item in this folder was skipped} other{{count} items in this folder were skipped}}. Links and unreadable items are not sent.'**
+  String folderItemsSkipped(int count);
+
   /// No description provided for @folderSomeFilesFailed.
   ///
   /// In en, this message translates to:
